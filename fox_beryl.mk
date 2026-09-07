@@ -1,4 +1,3 @@
-
 $(call inherit-product, device/xiaomi/beryl/device.mk)
 
 PRODUCT_DEVICE := beryl

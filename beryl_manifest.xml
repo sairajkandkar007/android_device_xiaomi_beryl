@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remote name="github" fetch="https://github.com/" revision="refs/heads/main" />
+  <project name="sairajkandkar007/android_device_xiaomi_beryl"
+           path="device/xiaomi/beryl"
+           remote="github"
+           revision="main" />
+</manifest>
