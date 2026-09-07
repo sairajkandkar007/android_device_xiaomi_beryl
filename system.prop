@@ -1,0 +1,13 @@
+ro.product.device=beryl
+ro.product.name=beryl
+ro.product.model=POCO M7 Pro 5G
+ro.product.manufacturer=Xiaomi
+ro.board.platform=mt6855
+ro.build.ab_update=true
+ro.virtual_ab.enabled=true
+ro.virtual_ab.compression.enabled=true
+ro.virtual_ab.userspace.snapshots.enabled=true
+ro.boot.dynamic_partitions=true
+ro.product.page_size=4096
+ro.product.cpu.pagesize.max=16384
+ro.minui.pixel_format=BGRA_8888

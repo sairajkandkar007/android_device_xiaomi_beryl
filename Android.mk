@@ -1,3 +1,4 @@
 LOCAL_PATH := $(call my-dir)
 
-# No standalone modules are defined by this device tree yet.
+# Device tree contains no standalone native modules.
+# OrangeFox recovery is assembled by the upstream recovery build system.
