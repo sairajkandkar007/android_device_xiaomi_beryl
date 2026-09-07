@@ -1,1 +1,34 @@
 
+# Stock-derived recovery fstab for Xiaomi POCO M7 Pro 5G (beryl).
+# Android 16 / vendor_boot HDR4 / dynamic partitions.
+# Both EROFS and ext4 forms are retained because stock recovery supports both.
+
+system      /system              erofs  ro,wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+system      /system              ext4   ro,wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+system_ext  /system_ext          erofs  ro,wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+system_ext  /system_ext          ext4   ro,wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+vendor      /vendor              erofs  ro,wait,slotselect,avb,logical,first_stage_mount
+vendor      /vendor              ext4   ro,wait,slotselect,avb,logical,first_stage_mount
+product     /product             erofs  ro,wait,slotselect,avb,logical,first_stage_mount
+product     /product             ext4   ro,wait,slotselect,avb,logical,first_stage_mount
+mi_ext      /mnt/vendor/mi_ext   erofs  ro,wait,slotselect,logical,first_stage_mount
+mi_ext      /mnt/vendor/mi_ext   ext4   ro,wait,slotselect,logical,first_stage_mount
+vendor_dlkm /vendor_dlkm         erofs  ro,wait,slotselect,avb,logical,first_stage_mount
+vendor_dlkm /vendor_dlkm         ext4   ro,wait,slotselect,avb,logical,first_stage_mount
+odm_dlkm    /odm_dlkm            erofs  ro,wait,slotselect,avb,logical,first_stage_mount
+odm_dlkm    /odm_dlkm            ext4   ro,wait,slotselect,avb,logical,first_stage_mount
+system_dlkm /system_dlkm         erofs  ro,wait,slotselect,avb,logical,first_stage_mount
+system_dlkm /system_dlkm         ext4   ro,wait,slotselect,avb,logical,first_stage_mount
+
+/dev/block/by-name/metadata       /metadata          ext4  noatime,nosuid,nodev,discard,wait,check,formattable,first_stage_mount
+/dev/block/by-name/userdata       /data              f2fs  gc_merge,atgc,age_extent_cache,noatime,nosuid,nodev,discard,noflush_merge,fsync_mode=nobarrier,reserve_root=134217,resgid=1065,inlinecrypt,wait,check,formattable,quota,latemount,resize,reservedsize=128m,checkpoint=fs,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized,keydirectory=/metadata/vold/metadata_encryption,fsverity
+/dev/block/by-name/rescue         /cache             ext4  noatime,nosuid,nodev,noauto_da_alloc,discard,wait,check,formattable
+/dev/block/by-name/persist        /mnt/vendor/persist ext4 noatime,nosuid,nodev,noauto_da_alloc,commit=1,nodelalloc,wait,check,formattable
+
+/dev/block/by-name/boot           /boot              emmc defaults,slotselect
+/dev/block/by-name/vendor_boot   /vendor_boot       emmc defaults
+/dev/block/by-name/init_boot     /init_boot         emmc defaults
+/dev/block/by-name/dtbo          /dtbo              emmc defaults
+/dev/block/by-name/vbmeta        /vbmeta            emmc defaults
+/dev/block/by-name/vbmeta_system /vbmeta_system     emmc defaults,slotselect
+/dev/block/by-name/vbmeta_vendor /vbmeta_vendor     emmc defaults,slotselect
