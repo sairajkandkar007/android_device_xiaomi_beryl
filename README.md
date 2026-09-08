@@ -43,12 +43,12 @@ Device specifications and configurations were derived from official Xiaomi stock
 |---------------|-------|
 | **Device Name** | Xiaomi POCO M7 Pro 5G |
 | **Codename** | beryl |
-| **SoC** | MediaTek Helio G99 Ultra (MT6855) |
-| **RAM** | 12GB LPDDR5 |
-| **Storage** | 256GB/512GB UFS 3.1 |
+| **SoC** | MediaTek dimensity 7025 Ultra (MT6855) |
+| **RAM** | 6GB/8GB LPDDR4 |
+| **Storage** | 128GB/256GB UFS 2.2 |
 | **Display** | 6.67" AMOLED, 2400×1080, 120Hz |
 | **Touchscreen** | FocalTech TS |
-| **OS** | Android 16 (MIUI 16) |
+| **OS** | Android 16 (Hyper os 3) |
 | **Partition Layout** | A/B + Virtual A/B + Dynamic Partitions |
 | **Recovery** | vendor_boot v4 (Experimental) |
 
