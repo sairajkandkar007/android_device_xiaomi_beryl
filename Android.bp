@@ -1,5 +1,5 @@
 // Device-specific Soong namespace.
-// OrangeFox/AOSP supplies the recovery binaries and libraries.
+// OrangeFox/AOSP provides the recovery framework and binaries.
 
 soong_namespace {
 }
