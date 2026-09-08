@@ -2,5 +2,6 @@ ro.product.vendor.device=beryl
 ro.product.vendor.name=beryl
 ro.product.vendor.model=POCO M7 Pro 5G
 ro.product.vendor.manufacturer=Xiaomi
+
 ro.vendor.build.ab_update=true
 ro.vendor.build.ab_ota_partitions=boot,product,system,vendor
