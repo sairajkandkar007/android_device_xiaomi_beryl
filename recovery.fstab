@@ -1,6 +1,8 @@
 # POCO M7 Pro 5G (beryl)
-# Android 16 / MT6855
+# Stock-matched Android 16 / MT6855
 # A/B + Virtual A/B + Dynamic Partitions
+#
+# Based on the installed Indian stock fstab.
 
 # Dynamic partitions
 system /system erofs ro,wait,slotselect,avb=vbmeta_system,logical
@@ -15,14 +17,16 @@ odm_dlkm /odm_dlkm erofs ro,wait,slotselect,avb,logical
 system_dlkm /system_dlkm erofs ro,wait,slotselect,avb,logical
 
 # Metadata
-/dev/block/by-name/metadata /metadata ext4 noatime,nosuid,nodev,discard,wait,check,formattable,first_stage_mount
+/dev/block/by-name/metadata /metadata ext4 \
+    noatime,nosuid,nodev,discard,wait,check,formattable,first_stage_mount
 
-# Userdata / Android FBE v2
+# Userdata
+# Stock Android 16 FBE configuration.
 /dev/block/by-name/userdata /data f2fs \
-    gc_merge,atgc,age_extent_cache,noatime,nosuid,nodev,discard,\
-noflush_merge,fsync_mode=nobarrier,reserve_root=134217,\
-resgid=1065,inlinecrypt,wait,check,formattable,quota,latemount,\
+    noatime,nosuid,nodev,discard,noflush_merge,\
+fsync_mode=nobarrier,reserve_root=134217,resgid=1065,\
+inlinecrypt,wait,check,formattable,quota,latemount,\
 resize,reservedsize=128m,checkpoint=fs,\
-fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized,\
+fileencryption=aes-256-xts:aes-256-cts:v2,\
 keydirectory=/metadata/vold/metadata_encryption,\
 fsverity
