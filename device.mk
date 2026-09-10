@@ -10,6 +10,7 @@ PRODUCT_NAME := fox_beryl
 PRODUCT_BRAND := Xiaomi
 PRODUCT_MODEL := POCO M7 Pro 5G
 PRODUCT_MANUFACTURER := Xiaomi
+PRODUCT_RELEASE_NAME := POCO M7 Pro 5G
 
 PRODUCT_SOONG_NAMESPACES += \
     $(LOCAL_PATH)
@@ -42,7 +43,9 @@ PRODUCT_SYSTEM_PROPERTIES += \
 
 PRODUCT_SYSTEM_PROPERTIES += \
     ro.build.version.release=16 \
-    ro.build.version.sdk=36
+    ro.build.version.sdk=36 \
+    ro.build.version.base_os= \
+    ro.build.version.security_patch=2026-09-01
 
 # ============================================================
 # Recovery display
@@ -59,7 +62,8 @@ PRODUCT_SYSTEM_PROPERTIES += \
 
 PRODUCT_SYSTEM_PROPERTIES += \
     ro.crypto.volume.filenames_mode=aes-256-cts \
-    ro.crypto.volume.metadata.enabled=true
+    ro.crypto.volume.metadata.enabled=true \
+    ro.crypto.type=block
 
 # ============================================================
 # Vendor identity
@@ -70,7 +74,8 @@ PRODUCT_VENDOR_PROPERTIES += \
     ro.product.vendor.name=beryl \
     ro.product.vendor.model=POCO\ M7\ Pro\ 5G \
     ro.product.vendor.manufacturer=Xiaomi \
-    ro.vendor.build.ab_update=true
+    ro.vendor.build.ab_update=true \
+    ro.vendor.fingerprint=Xiaomi/beryl/beryl:16/unknown/user/release-keys
 
 # ============================================================
 # Recovery / security configuration
@@ -103,7 +108,21 @@ PRODUCT_PACKAGES += \
     e2fsck \
     fsck.f2fs \
     resize2fs \
-    tune2fs
+    tune2fs \
+    parted \
+    sgdisk
+
+# ============================================================
+# Additional system tools for recovery
+# ============================================================
+
+PRODUCT_PACKAGES += \
+    bash \
+    nano \
+    vim \
+    busybox \
+    tar \
+    lz4
 
 # ============================================================
 # Do NOT add vendor security services here until their exact
