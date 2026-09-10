@@ -1,0 +1,84 @@
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index 237a992..abcd123 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -5,7 +5,7 @@ LOCAL_PATH := $(call my-dir)
+ # POCO M7 Pro 5G (beryl)
+-# MT6855 / Android 16 / API 36
++# MT6855 / Android 16 / API 36 - OrangeFox 14.1 Compatible
+ # OrangeFox 14.1
+ # ============================================================
+ 
+@@ -40,6 +40,10 @@ BOARD_DTBOIMG_PARTITION_SIZE := 8388608
+ # vendor_boot v4 recovery
+ TARGET_NO_RECOVERY := true
+ BOARD_USES_RECOVERY_AS_BOOT := false
+ BOARD_BUILD_SYSTEM_ROOT_IMAGE := false
++
++# API 36 recovery compatibility
++TARGET_RECOVERY_API_VERSION := 36
++BOARD_RECOVERY_SUPPORTS_TAR := true
++BOARD_RECOVERY_SUPPORTS_OZIP := true
+ 
+diff --git a/fox_beryl.mk b/fox_beryl.mk
+index d5efe4b..xyz9876 100644
+--- a/fox_beryl.mk
++++ b/fox_beryl.mk
+@@ -3,7 +3,7 @@ $(call inherit-product, device/xiaomi/beryl/device.mk)
+ # ============================================================
+ # OrangeFox 14.1
+ # POCO M7 Pro 5G (beryl)
+-# ============================================================
++# Android 16 / API 36 Compatible Build
++# ============================================================
+ 
+ PRODUCT_DEVICE := beryl
+ PRODUCT_NAME := fox_beryl
+@@ -18,6 +18,11 @@ OF_MAINTAINER := beryl
+ # Screen
+ OF_SCREEN_WIDTH := 2400
+ OF_STATUS_INDENT := 100
++
++# API 36 Specific Configurations
++OF_ADD_API_V36_PREBUILTS := 1
++OF_SUPPORT_ALL_BLOCK_OTA_UPDATES := 1
++OF_SUPPORT_OZIP_DECRYPTION := 1
+ 
+ # ============================================================
+ # A/B + Virtual A/B
+diff --git a/device.mk b/device.mk
+index c272eb2..def4567 100644
+--- a/device.mk
++++ b/device.mk
+@@ -3,7 +3,7 @@ LOCAL_PATH := $(call my-dir)
+ # ============================================================
+ # POCO M7 Pro 5G (beryl)
+-# Android 16 / API 36
++# Android 16 / API 36 - OrangeFox 14.1 Recovery
+ # ============================================================
+ 
+ PRODUCT_DEVICE := beryl
+@@ -40,8 +40,8 @@ PRODUCT_SYSTEM_PROPERTIES += \
+ # ============================================================
+ # Android 16 / API 36
+ # ============================================================
+ 
+ PRODUCT_SYSTEM_PROPERTIES += \
+     ro.build.version.release=16 \
+-    ro.build.version.sdk=36
++    ro.build.version.sdk=36 \
++    ro.build.version.security_patch=2026-09-01
+ 
+ # ============================================================
+ # Recovery display
+@@ -96,6 +96,8 @@ PRODUCT_PACKAGES += \
+ PRODUCT_PACKAGES += \
+     e2fsck \
+     fsck.f2fs \
+     resize2fs \
+     tune2fs \
++    parted \
++    sgdisk
+ 
+ # ============================================================
+ # Do NOT add vendor security services here until their exact
