@@ -27,12 +27,13 @@ jobs:
           fetch-depth: 0
 
       # ============================================================
-      # DEPENDENCIES
+      # HOST DEPENDENCIES
       # ============================================================
 
       - name: Install dependencies
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           sudo apt-get update
 
@@ -53,17 +54,27 @@ jobs:
             rsync \
             device-tree-compiler \
             binutils \
-            grep \
-            sed \
-            awk
+            gawk
+
+          echo
+          echo "===== TOOL VERSIONS ====="
+
+          python3 --version
+          git --version
+          curl --version | head -1
+          lz4 --version | head -1
+          cpio --version | head -1
+          dtc --version
+          gawk --version | head -1
 
       # ============================================================
       # WORKSPACE
       # ============================================================
 
       - name: Prepare workspace
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           rm -rf \
             stock \
@@ -77,7 +88,7 @@ jobs:
             generated
 
       # ============================================================
-      # PIXELDRAIN DOWNLOADS
+      # PIXELDRAIN
       # ============================================================
 
       - name: Download stock images
@@ -86,14 +97,14 @@ jobs:
           set -euo pipefail
 
           download() {
-            ID="$1"
-            NAME="$2"
+            local id="$1"
+            local name="$2"
 
             echo
-            echo "=========================================="
-            echo "Downloading $NAME"
-            echo "PixelDrain ID: $ID"
-            echo "=========================================="
+            echo "============================================"
+            echo "Downloading: $name"
+            echo "PixelDrain ID: $id"
+            echo "============================================"
 
             curl \
               --fail \
@@ -101,12 +112,13 @@ jobs:
               --retry 10 \
               --retry-delay 5 \
               --connect-timeout 30 \
-              --output "stock/$NAME" \
-              "https://pixeldrain.com/api/file/$ID?download"
+              --output "stock/$name" \
+              "https://pixeldrain.com/api/file/$id?download"
 
-            test -s "stock/$NAME"
+            test -s "stock/$name"
 
-            ls -lh "stock/$NAME"
+            echo "Downloaded:"
+            ls -lh "stock/$name"
           }
 
           download "NchNVhH6" "boot.img"
@@ -119,92 +131,95 @@ jobs:
           download "J8PcuWZH" "vbmeta_vendor.img"
 
       # ============================================================
-      # STOCK VERIFICATION
+      # VERIFY DOWNLOADS
       # ============================================================
 
-      - name: Verify stock images
+      - name: Verify stock files
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "===== FILES ====="
+          echo "===== STOCK FILES ====="
           ls -lh stock/
 
           echo
-          echo "===== TYPES ====="
-          file stock/*.img
+          echo "===== FILE TYPES ====="
+
+          for f in stock/*.img; do
+            file "$f"
+          done
 
           echo
-          echo "===== HASHES ====="
+          echo "===== SHA256 ====="
+
           sha256sum stock/*.img | tee stock/SHA256SUMS.txt
 
       # ============================================================
-      # VERIFY BOOT
+      # BOOT HEADER
       # ============================================================
 
       - name: Inspect boot image
+        shell: bash
         run: |
+          set -euo pipefail
+
           python3 <<'PY'
           import struct
 
-          p = "stock/boot.img"
+          with open("stock/boot.img", "rb") as f:
+              data = f.read(4096)
 
-          with open(p, "rb") as f:
-              d = f.read(4096)
+          if data[:8] != b"ANDROID!":
+              raise SystemExit("boot.img is not an Android boot image")
 
-          if d[:8] != b"ANDROID!":
-              raise SystemExit("Invalid boot.img")
+          header = struct.unpack_from("<I", data, 8)[0]
+          kernel = struct.unpack_from("<I", data, 16)[0]
+          ramdisk = struct.unpack_from("<I", data, 24)[0]
+          page = struct.unpack_from("<I", data, 36)[0]
 
-          header = struct.unpack_from("<I", d, 8)[0]
-          page = struct.unpack_from("<I", d, 36)[0]
+          print("BOOT")
+          print("  header version :", header)
+          print("  page size      :", page)
+          print("  kernel size    :", kernel)
+          print("  ramdisk size   :", ramdisk)
 
-          kernel_size = struct.unpack_from("<I", d, 16)[0]
-          ramdisk_size = struct.unpack_from("<I", d, 24)[0]
-
-          print("boot header version :", header)
-          print("page size           :", page)
-          print("kernel size         :", kernel_size)
-          print("ramdisk size        :", ramdisk_size)
-
-          if header != 4:
-              raise SystemExit("Expected boot header v4")
-
-          if page != 4096:
-              raise SystemExit("Expected 4096-byte pages")
+          assert header == 4
+          assert page == 4096
           PY
 
       # ============================================================
-      # VERIFY VENDOR BOOT
+      # VENDOR BOOT HEADER
       # ============================================================
 
       - name: Inspect vendor_boot image
+        shell: bash
         run: |
+          set -euo pipefail
+
           python3 <<'PY'
           import struct
 
-          p = "stock/vendor_boot.img"
+          with open("stock/vendor_boot.img", "rb") as f:
+              data = f.read(4096)
 
-          with open(p, "rb") as f:
-              d = f.read(4096)
+          if data[:8] != b"VNDRBOOT":
+              raise SystemExit(
+                  "vendor_boot.img is not a vendor_boot image"
+              )
 
-          if d[:8] != b"VNDRBOOT":
-              raise SystemExit("Invalid vendor_boot.img")
+          header = struct.unpack_from("<I", data, 8)[0]
+          page = struct.unpack_from("<I", data, 12)[0]
+          ramdisk = struct.unpack_from("<I", data, 24)[0]
+          dtb = struct.unpack_from("<I", data, 28)[0]
 
-          header = struct.unpack_from("<I", d, 8)[0]
-          page = struct.unpack_from("<I", d, 12)[0]
-          ramdisk = struct.unpack_from("<I", d, 24)[0]
-          dtb = struct.unpack_from("<I", d, 28)[0]
+          print("VENDOR BOOT")
+          print("  header version :", header)
+          print("  page size      :", page)
+          print("  ramdisk size   :", ramdisk)
+          print("  DTB size       :", dtb)
 
-          print("vendor_boot header :", header)
-          print("page size          :", page)
-          print("vendor ramdisk     :", ramdisk)
-          print("DTB size           :", dtb)
-
-          if header != 4:
-              raise SystemExit("Expected vendor_boot header v4")
-
-          if page != 4096:
-              raise SystemExit("Expected 4096-byte pages")
+          assert header == 4
+          assert page == 4096
           PY
 
       # ============================================================
@@ -212,8 +227,9 @@ jobs:
       # ============================================================
 
       - name: Install twrpdtgen
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           python3 -m venv .venv
 
@@ -221,7 +237,8 @@ jobs:
 
           python -m pip install --upgrade pip
 
-          python -m pip install twrpdtgen
+          python -m pip install \
+            twrpdtgen==3.0.0
 
           python -m twrpdtgen --help
 
@@ -229,10 +246,10 @@ jobs:
       # EXTRACT BOOT
       # ============================================================
 
-      - name: Extract stock boot.img
+      - name: Extract boot image
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           mkdir -p work/boot
 
@@ -244,7 +261,7 @@ jobs:
           import shutil
 
           image = Path("stock/boot.img")
-          out = Path("work/boot")
+          output = Path("work/boot")
 
           aik = AIKManager()
 
@@ -256,7 +273,7 @@ jobs:
           if Path(info.ramdisk).exists():
               shutil.copytree(
                   info.ramdisk,
-                  out / "ramdisk",
+                  output / "ramdisk",
                   dirs_exist_ok=True
               )
           PY
@@ -272,10 +289,10 @@ jobs:
       # EXTRACT VENDOR_BOOT
       # ============================================================
 
-      - name: Extract vendor_boot.img
+      - name: Extract vendor_boot image
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           python3 <<'PY'
           from pathlib import Path
@@ -284,26 +301,30 @@ jobs:
           import shutil
 
           image = Path("stock/vendor_boot.img")
-          out = Path("work/vendor_boot")
+          output = Path("work/vendor_boot")
 
-          out.mkdir(parents=True, exist_ok=True)
+          output.mkdir(parents=True, exist_ok=True)
 
           data = image.read_bytes()
 
           assert data[:8] == b"VNDRBOOT"
 
-          page = struct.unpack_from("<I", data, 12)[0]
+          page_size = struct.unpack_from("<I", data, 12)[0]
           ramdisk_size = struct.unpack_from("<I", data, 24)[0]
           dtb_size = struct.unpack_from("<I", data, 28)[0]
 
-          def align(x, a):
-              return ((x + a - 1) // a) * a
+          def align(value, alignment):
+              return (
+                  (value + alignment - 1)
+                  // alignment
+                  * alignment
+              )
 
-          ramdisk_offset = page
+          ramdisk_offset = page_size
 
           dtb_offset = align(
               ramdisk_offset + ramdisk_size,
-              page
+              page_size
           )
 
           ramdisk = data[
@@ -316,15 +337,14 @@ jobs:
               dtb_offset + dtb_size
           ]
 
-          raw = out / "vendor_ramdisk.lz4"
-          cpio = out / "vendor_ramdisk.cpio"
+          raw = output / "vendor_ramdisk.lz4"
+          cpio = output / "vendor_ramdisk.cpio"
 
           raw.write_bytes(ramdisk)
-
-          (out / "dtb.img").write_bytes(dtb)
+          (output / "dtb.img").write_bytes(dtb)
 
           # --------------------------------------------------------
-          # Normal LZ4
+          # Try standard LZ4 first
           # --------------------------------------------------------
 
           result = subprocess.run(
@@ -339,58 +359,55 @@ jobs:
               text=True
           )
 
-          # --------------------------------------------------------
-          # Legacy block fallback
-          # --------------------------------------------------------
-
           if result.returncode != 0:
 
-              print("Normal LZ4 decode failed.")
-              print("Trying legacy LZ4 blocks.")
+              print(
+                  "Standard LZ4 decode failed; "
+                  "using legacy LZ4 block decoder."
+              )
 
-              src = ramdisk
+              source = ramdisk
+              magic = b"\x02\x21\x4c\x18"
 
-              MAGIC = b"\x02\x21\x4c\x18"
-
-              pos = 0
+              position = 0
               decoded = bytearray()
               block_number = 0
 
               while True:
 
-                  idx = src.find(MAGIC, pos)
+                  index = source.find(magic, position)
 
-                  if idx < 0:
+                  if index < 0:
                       break
 
-                  if idx + 8 > len(src):
+                  if index + 8 > len(source):
                       break
 
-                  size = int.from_bytes(
-                      src[idx + 4:idx + 8],
+                  compressed_size = int.from_bytes(
+                      source[index + 4:index + 8],
                       "little"
                   )
 
-                  start = idx + 8
-                  end = start + size
+                  start = index + 8
+                  end = start + compressed_size
 
-                  if end > len(src):
+                  if end > len(source):
                       break
 
-                  compressed = src[start:end]
+                  compressed = source[start:end]
 
                   block_in = (
-                      out / f"block_{block_number}.lz4"
+                      output / f"block_{block_number}.lz4"
                   )
 
                   block_out = (
-                      out / f"block_{block_number}.raw"
+                      output / f"block_{block_number}.raw"
                   )
 
                   block_in.write_bytes(
-                      MAGIC +
-                      size.to_bytes(4, "little") +
-                      compressed
+                      magic
+                      + compressed_size.to_bytes(4, "little")
+                      + compressed
                   )
 
                   subprocess.run(
@@ -408,7 +425,7 @@ jobs:
                       block_out.read_bytes()
                   )
 
-                  pos = end
+                  position = end
                   block_number += 1
 
               if not decoded:
@@ -421,14 +438,14 @@ jobs:
               print(
                   "Decoded",
                   block_number,
-                  "LZ4 blocks"
+                  "legacy LZ4 blocks."
               )
 
           # --------------------------------------------------------
-          # CPIO extraction
+          # Extract CPIO
           # --------------------------------------------------------
 
-          ramdisk_dir = out / "ramdisk"
+          ramdisk_dir = output / "ramdisk"
 
           if ramdisk_dir.exists():
               shutil.rmtree(ramdisk_dir)
@@ -444,24 +461,86 @@ jobs:
                   check=True
               )
 
-          print("vendor_boot extracted.")
+          print("vendor_boot ramdisk extracted.")
           PY
 
           echo
-          echo "===== VENDOR BOOT RAMDISK ====="
+          echo "===== VENDOR RAMDISK ====="
 
           find work/vendor_boot/ramdisk \
             -type f \
             | sort
 
       # ============================================================
+      # STOCK BOOT CONTROL DISCOVERY
+      # ============================================================
+
+      - name: Scan stock boot control
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/bootctrl
+
+          {
+            echo "============================================"
+            echo "BOOT CONTROL SCAN"
+            echo "============================================"
+            echo
+
+            echo "Possible bootctrl files:"
+            find work/boot/ramdisk \
+              work/vendor_boot/ramdisk \
+              -type f \
+              \( \
+                -iname "*bootctrl*" \
+                -o -iname "*boot_control*" \
+              \) \
+              -print \
+              2>/dev/null || true
+
+            echo
+            echo "Possible boot HAL files:"
+            find work/boot/ramdisk \
+              work/vendor_boot/ramdisk \
+              -type f \
+              \( \
+                -iname "*android.hardware.boot*" \
+                -o -iname "*boot*.hal*" \
+              \) \
+              -print \
+              2>/dev/null || true
+
+            echo
+            echo "A/B related files:"
+            find work/boot/ramdisk \
+              work/vendor_boot/ramdisk \
+              -type f \
+              | grep -Ei \
+                "bootctrl|boot.control|slot|ab_update|boot_hal" \
+              || true
+
+            echo
+            echo "Boot-control strings:"
+            grep -Rai \
+              -E \
+              "bootctrl|boot_control|android.hardware.boot|markBootSuccessful|setActiveBootSlot|activeBootSlot" \
+              work/boot/ramdisk \
+              work/vendor_boot/ramdisk \
+              2>/dev/null \
+              | head -500 \
+              || true
+
+          } | tee work/bootctrl/discovery.txt
+
+      # ============================================================
       # RUN TWRPDTGEN
       # ============================================================
 
-      - name: Generate initial TWRP device tree
+      - name: Run twrpdtgen
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           . .venv/bin/activate
 
@@ -470,8 +549,8 @@ jobs:
           mkdir -p generated
 
           python -m twrpdtgen \
-            -o generated \
-            stock/boot.img
+            stock/boot.img \
+            -o generated
 
           echo
           echo "===== TWRPDTGEN OUTPUT ====="
@@ -481,13 +560,13 @@ jobs:
             | sort
 
       # ============================================================
-      # FIND GENERATED TREE
+      # FIND TREE
       # ============================================================
 
-      - name: Locate generated tree
+      - name: Locate generated beryl tree
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           FOUND="$(
             find generated \
@@ -506,7 +585,7 @@ jobs:
           fi
 
           if [ -z "$FOUND" ]; then
-            echo "ERROR: twrpdtgen did not create a beryl tree."
+            echo "ERROR: twrpdtgen did not produce a beryl tree."
             exit 1
           fi
 
@@ -516,13 +595,13 @@ jobs:
           echo "$FOUND"
 
       # ============================================================
-      # IMPORT COMPLETE STOCK RECOVERY ENVIRONMENT
+      # CREATE COMPLETE DEVICE TREE DIRECTORIES
       # ============================================================
 
-      - name: Import vendor recovery environment
+      - name: Prepare complete device tree
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           TREE="$GENERATED_TREE"
 
@@ -530,66 +609,89 @@ jobs:
             "$TREE/root" \
             "$TREE/root/system" \
             "$TREE/root/vendor" \
+            "$TREE/init" \
             "$TREE/modules" \
             "$TREE/dtb" \
-            "$TREE/prebuilt"
+            "$TREE/prebuilt" \
+            "$TREE/bootctrl"
 
-          # --------------------------------------------------------
-          # Recovery init
-          # --------------------------------------------------------
+      # ============================================================
+      # IMPORT RECOVERY INIT
+      # ============================================================
 
-          for f in \
+      - name: Import recovery init
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TREE="$GENERATED_TREE"
+
+          for FILE in \
             init.recovery.hardware.rc \
             init.recovery.mt6855.rc
           do
 
-            if [ -f "work/vendor_boot/ramdisk/$f" ]; then
+            if [ -f \
+              "work/vendor_boot/ramdisk/$FILE"
+            ]; then
 
               cp \
-                "work/vendor_boot/ramdisk/$f" \
-                "$TREE/root/$f"
+                "work/vendor_boot/ramdisk/$FILE" \
+                "$TREE/init/$FILE"
+
+              cp \
+                "work/vendor_boot/ramdisk/$FILE" \
+                "$TREE/root/$FILE"
 
             fi
 
           done
 
-          # --------------------------------------------------------
-          # first_stage_ramdisk
-          # --------------------------------------------------------
+      # ============================================================
+      # IMPORT FIRST STAGE RAMDISK
+      # ============================================================
+
+      - name: Import first stage ramdisk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TREE="$GENERATED_TREE"
 
           if [ -d \
             "work/vendor_boot/ramdisk/first_stage_ramdisk"
           ]; then
 
             cp -a \
-              "work/vendor_boot/ramdisk/first_stage_ramdisk" \
+              "work/vendor_boot/ramdisk/first_stage_ramdisk/." \
               "$TREE/root/"
 
           fi
 
-          # --------------------------------------------------------
-          # DTB
-          # --------------------------------------------------------
+      # ============================================================
+      # IMPORT MODULES
+      # ============================================================
 
-          cp \
-            work/vendor_boot/dtb.img \
-            "$TREE/dtb/vendor_boot.dtb"
+      - name: Import recovery kernel modules
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          # --------------------------------------------------------
-          # Kernel modules
-          # --------------------------------------------------------
+          TREE="$GENERATED_TREE"
 
           if [ -d \
             "work/vendor_boot/ramdisk/lib/modules"
           ]; then
 
+            mkdir -p "$TREE/modules/lib"
+
             cp -a \
               "work/vendor_boot/ramdisk/lib/modules" \
-              "$TREE/modules/"
+              "$TREE/modules/lib/"
 
           fi
 
-          for f in \
+          for FILE in \
             modules.alias \
             modules.dep \
             modules.load \
@@ -598,141 +700,78 @@ jobs:
           do
 
             if [ -f \
-              "work/vendor_boot/ramdisk/$f"
+              "work/vendor_boot/ramdisk/$FILE"
             ]; then
 
               cp \
-                "work/vendor_boot/ramdisk/$f" \
-                "$TREE/modules/$f"
+                "work/vendor_boot/ramdisk/$FILE" \
+                "$TREE/modules/$FILE"
 
             fi
 
           done
 
       # ============================================================
-      # STOCK FSTAB
+      # IMPORT DTB
       # ============================================================
 
-      - name: Import stock fstab
+      - name: Import stock DTB
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           TREE="$GENERATED_TREE"
 
-          FSTAB=""
+          cp \
+            work/vendor_boot/dtb.img \
+            "$TREE/dtb/vendor_boot.dtb"
+
+      # ============================================================
+      # IMPORT STOCK FSTAB
+      # ============================================================
+
+      - name: Import stock recovery fstab
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TREE="$GENERATED_TREE"
 
           if [ -f \
             work/vendor_boot/ramdisk/first_stage_ramdisk/fstab.mt6855
           ]; then
 
-            FSTAB=\
-            work/vendor_boot/ramdisk/first_stage_ramdisk/fstab.mt6855
+            cp \
+              work/vendor_boot/ramdisk/first_stage_ramdisk/fstab.mt6855 \
+              "$TREE/recovery.fstab"
 
           elif [ -f \
             work/vendor_boot/ramdisk/first_stage_ramdisk/fstab.emmc
           ]; then
 
-            FSTAB=\
-            work/vendor_boot/ramdisk/first_stage_ramdisk/fstab.emmc
+            cp \
+              work/vendor_boot/ramdisk/first_stage_ramdisk/fstab.emmc \
+              "$TREE/recovery.fstab"
 
-          fi
+          else
 
-          if [ -z "$FSTAB" ]; then
-            echo "ERROR: Stock fstab not found."
+            echo "ERROR: no stock fstab found."
             exit 1
-          fi
 
-          cp "$FSTAB" "$TREE/recovery.fstab"
+          fi
 
           echo
-          echo "===== STOCK FSTAB ====="
+          echo "===== RECOVERY FSTAB ====="
           cat "$TREE/recovery.fstab"
 
       # ============================================================
-      # BOOT CONTROL / A-B DISCOVERY
+      # COMPLETE BOARD CONFIG
       # ============================================================
 
-      - name: Discover boot control implementation
+      - name: Generate BoardConfig
         shell: bash
         run: |
-          set -e
-
-          TREE="$GENERATED_TREE"
-
-          mkdir -p "$TREE/bootctrl"
-
-          REPORT="$TREE/bootctrl/BOOTCTRL_DISCOVERY.txt"
-
-          {
-            echo "beryl boot-control discovery"
-            echo
-            echo "========================================"
-            echo "STOCK RAMDISK"
-            echo "========================================"
-
-            find work/boot/ramdisk \
-              -type f \
-              \( \
-                -iname "*bootctrl*" \
-                -o -iname "*boot_control*" \
-              \) \
-              -print || true
-
-            echo
-            echo "========================================"
-            echo "VENDOR RAMDISK"
-            echo "========================================"
-
-            find work/vendor_boot/ramdisk \
-              -type f \
-              \( \
-                -iname "*bootctrl*" \
-                -o -iname "*boot_control*" \
-                -o -iname "*android.hardware.boot*" \
-              \) \
-              -print || true
-
-            echo
-            echo "========================================"
-            echo "STOCK MODULES"
-            echo "========================================"
-
-            find work/vendor_boot/ramdisk \
-              -type f \
-              -iname "*.ko" \
-              -print \
-              | grep -Ei \
-                "boot|slot|ab|mtk" \
-              || true
-
-            echo
-            echo "========================================"
-            echo "STRING SEARCH"
-            echo "========================================"
-
-            grep -Rai \
-              -E \
-              "bootctrl|boot_control|android.hardware.boot|markBootSuccessful|setActiveBootSlot|activeBootSlot" \
-              work/boot/ramdisk \
-              work/vendor_boot/ramdisk \
-              2>/dev/null \
-              | head -300 \
-              || true
-
-          } | tee "$REPORT"
-
-          echo
-          echo "Boot-control discovery completed."
-
-      # ============================================================
-      # BUILD COMPLETE BOARD CONFIG
-      # ============================================================
-
-      - name: Generate complete BoardConfig
-        shell: bash
-        run: |
-          set -e
+          set -euo pipefail
 
           TREE="$GENERATED_TREE"
 
@@ -742,9 +781,10 @@ jobs:
           # Redmi Note 14 5G
           #
           # Codename: beryl
-          # SoC: MediaTek MT6855
+          # Platform: MT6855
           #
-          # Common TWRP 12.1 / OrangeFox 12.1 tree
+          # Common recovery hardware tree
+          # TWRP 12.1 / OrangeFox 12.1
           #
 
           DEVICE_PATH := device/xiaomi/beryl
@@ -784,13 +824,13 @@ jobs:
           EOF
 
       # ============================================================
-      # PRODUCT FILES
+      # PRODUCT CONFIG
       # ============================================================
 
-      - name: Generate Android build files
+      - name: Generate Android product files
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           TREE="$GENERATED_TREE"
 
@@ -826,161 +866,122 @@ jobs:
           add_lunch_combo twrp_beryl-eng
           EOF
 
-      # ============================================================
-      # RECOVERY INIT DIRECTORY
-      # ============================================================
-
-      - name: Organize recovery init files
-        shell: bash
-        run: |
-          set -e
-
-          TREE="$GENERATED_TREE"
-
-          mkdir -p "$TREE/init"
-
-          for f in \
-            init.recovery.hardware.rc \
-            init.recovery.mt6855.rc
-          do
-
-            if [ -f "$TREE/root/$f" ]; then
-
-              cp \
-                "$TREE/root/$f" \
-                "$TREE/init/$f"
-
-            fi
-
-          done
-
-      # ============================================================
-      # STOCK IMAGE METADATA
-      # ============================================================
-
-      - name: Generate stock hardware report
-        shell: bash
-        run: |
-          set -e
-
-          TREE="$GENERATED_TREE"
-
-          cat > "$TREE/STOCK_HARDWARE.md" <<'EOF'
-          # POCO M7 Pro 5G — beryl
-
-          ## Hardware
-
-          - Device: POCO M7 Pro 5G
-          - Codename: beryl
-          - Manufacturer: Xiaomi
-          - SoC: MediaTek Dimensity 7025-Ultra
-          - Platform: MT6855
-          - Architecture: ARM64
-          - Kernel family: GKI / Linux 5.10
-          - Storage: UFS
-          - Layout: A/B
-          - Dynamic partitions: yes
-          - Boot header: v4
-          - Page size: 4096
-          - Recovery environment: vendor_boot
-          - AVB: enabled
-          - userdata: F2FS
-          - FBE/inline encryption: enabled
-
-          ## Recovery targets
-
-          This hardware tree is intended to be shared by:
-
-          - TWRP 12.1
-          - OrangeFox 12.1
-
-          Framework-specific configuration should be layered on top of
-          this common hardware tree.
-
-          ## Stock sources
-
-          - boot.img
-          - vendor_boot.img
-          - vendor_dlkm.img
-          - odm_dlkm.img
-          - dtbo.img
-          - vbmeta.img
-          - vbmeta_system.img
-          - vbmeta_vendor.img
-          EOF
-
-          {
-            echo
-            echo "## Stock SHA256"
-            echo
-            cat stock/SHA256SUMS.txt
-          } >> "$TREE/STOCK_HARDWARE.md"
-
-      # ============================================================
-      # CREATE COMMON RECOVERY MAKEFILES
-      # ============================================================
-
-      - name: Generate recovery Android makefiles
-        shell: bash
-        run: |
-          set -e
-
-          TREE="$GENERATED_TREE"
-
-          cat > "$TREE/Android.mk" <<'EOF'
-          LOCAL_PATH := $(call my-dir)
-
-          include $(CLEAR_VARS)
-
-          LOCAL_MODULE := beryl_recovery_modules
-          LOCAL_MODULE_CLASS := ETC
-          LOCAL_MODULE_TAGS := optional
-
-          include $(BUILD_PREBUILT)
-          EOF
-
           cat > "$TREE/Android.bp" <<'EOF'
           soong_namespace {
           }
           EOF
 
       # ============================================================
-      # CHECK BOOTCTRL RESULTS
+      # BOOTCTRL REPORT
       # ============================================================
 
-      - name: Show bootctrl discovery
+      - name: Save bootctrl discovery
+        shell: bash
         run: |
-          echo
-          echo "============================================"
-          echo "BOOTCTRL DISCOVERY"
-          echo "============================================"
+          set -euo pipefail
 
-          cat \
+          cp \
+            work/bootctrl/discovery.txt \
             "$GENERATED_TREE/bootctrl/BOOTCTRL_DISCOVERY.txt"
 
       # ============================================================
-      # VALIDATE COMPLETE TREE
+      # HARDWARE REPORT
       # ============================================================
 
-      - name: Validate complete device tree
+      - name: Generate hardware documentation
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           TREE="$GENERATED_TREE"
 
-          echo "===== REQUIRED FILES ====="
+          cat > "$TREE/STOCK_HARDWARE.md" <<'EOF'
+          # beryl Recovery Device Tree
+
+          ## Device
+
+          POCO M7 Pro 5G / Redmi Note 14 5G
+
+          ## Codename
+
+          beryl
+
+          ## Platform
+
+          MediaTek MT6855
+
+          ## Architecture
+
+          ARM64
+
+          ## Kernel
+
+          GKI / Linux 5.10
+
+          ## Boot
+
+          Android boot header v4
+
+          Page size: 4096
+
+          ## Recovery
+
+          vendor_boot based recovery environment
+
+          ## Partition layout
+
+          A/B
+
+          Dynamic partitions
+
+          ## Storage
+
+          UFS
+
+          ## Encryption
+
+          F2FS userdata with inline encryption
+
+          ## Security
+
+          AVB enabled
+
+          ## Target recoveries
+
+          This is intended as the common hardware/device layer for:
+
+          - TWRP 12.1
+          - OrangeFox 12.1
+
+          Recovery-framework-specific features should be kept outside
+          the common hardware configuration.
+
+          ## Boot control
+
+          Boot-control components are discovered from the stock images.
+          No fabricated HAL or bootctrl implementation is included.
+          EOF
+
+      # ============================================================
+      # VALIDATE
+      # ============================================================
+
+      - name: Validate device tree
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TREE="$GENERATED_TREE"
+
+          echo "============================================"
+          echo "CORE DEVICE TREE"
+          echo "============================================"
 
           test -f "$TREE/BoardConfig.mk"
           test -f "$TREE/AndroidProducts.mk"
           test -f "$TREE/device.mk"
           test -f "$TREE/vendorsetup.sh"
           test -f "$TREE/recovery.fstab"
-
-          echo "Core files OK."
-
-          echo
-          echo "===== BOARD CONFIG ====="
 
           grep -q \
             "TARGET_BOARD_PLATFORM := mt6855" \
@@ -998,41 +999,34 @@ jobs:
             "BOARD_USES_GENERIC_KERNEL_IMAGE := true" \
             "$TREE/BoardConfig.mk"
 
-          echo "BoardConfig OK."
+          echo "Core validation passed."
 
           echo
-          echo "===== MODULES ====="
+          echo "============================================"
+          echo "DIRECTORIES"
+          echo "============================================"
 
-          if [ -d "$TREE/modules" ]; then
-            find "$TREE/modules" -type f | sort
-          fi
-
-          echo
-          echo "===== INIT ====="
-
-          if [ -d "$TREE/init" ]; then
-            find "$TREE/init" -type f | sort
-          fi
+          find "$TREE" \
+            -type d \
+            | sort
 
           echo
-          echo "===== TREE ====="
+          echo "============================================"
+          echo "FILES"
+          echo "============================================"
 
-          find "$TREE" -type f | sort
+          find "$TREE" \
+            -type f \
+            | sort
 
       # ============================================================
-      # COPY TREE TO NORMAL DEVICE TREE LOCATION
-      #
-      # The final repository contains:
-      #
-      # device/xiaomi/beryl/
-      #
-      # NOT a repository-root beryl folder.
+      # INSTALL AS STANDARD ANDROID DEVICE TREE
       # ============================================================
 
-      - name: Install final device tree
+      - name: Install device tree
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           FINAL="device/xiaomi/beryl"
 
@@ -1044,14 +1038,15 @@ jobs:
             "$GENERATED_TREE" \
             "$FINAL"
 
-          echo "Final tree:"
-          find "$FINAL" -type f | sort
+          echo "Installed:"
+          echo "$FINAL"
 
       # ============================================================
-      # REMOVE STOCK IMAGES FROM GIT TREE
+      # REMOVE TEMPORARY FILES
       # ============================================================
 
-      - name: Remove temporary stock data
+      - name: Remove temporary files
+        shell: bash
         run: |
           rm -rf \
             stock \
@@ -1060,13 +1055,13 @@ jobs:
             .venv
 
       # ============================================================
-      # COMMIT
+      # COMMIT TREE
       # ============================================================
 
-      - name: Commit generated device tree
+      - name: Commit device tree
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           git config user.name \
             "github-actions[bot]"
@@ -1077,7 +1072,7 @@ jobs:
           git add -A
 
           if git diff --cached --quiet; then
-            echo "No changes."
+            echo "No changes to commit."
             exit 0
           fi
 
