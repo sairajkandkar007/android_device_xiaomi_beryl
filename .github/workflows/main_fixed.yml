@@ -17,6 +17,7 @@ jobs:
       DEVICE: beryl
       VENDOR: xiaomi
       TREE: device/xiaomi/beryl
+      PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY || '0f117d82-ac8f-4536-af44-ec0e99d4798f' }}
 
     steps:
 
@@ -72,8 +73,8 @@ jobs:
               --retry 10 \
               --retry-delay 5 \
               --connect-timeout 30 \
+              -u ":$PIXELDRAIN_API_KEY" \
               -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36" \
-              -H "Referer: https://pixeldrain.com/u/$id" \
               --output "stock/$name" \
               "https://pixeldrain.com/api/file/$id?download"
 
@@ -244,7 +245,6 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text(encoding="utf-8")
 
-          # Normalize tabs across file to prevent indentation mismatch
           text = text.expandtabs(4)
 
           location = 'Path("system") / "etc" / "ramdisk" / "build.prop"'
