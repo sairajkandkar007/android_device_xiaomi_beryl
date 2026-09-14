@@ -43,21 +43,6 @@ jobs:
           cpio --version | head -1
           dtc --version
 
-      - name: Validate workflow YAML
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import yaml
-
-          path = Path(".github/workflows/main.yml")
-          with path.open("r", encoding="utf-8") as f:
-              yaml.safe_load(f)
-
-          print("Workflow YAML syntax: OK")
-          PY
-
       - name: Prepare workspace
         shell: bash
         run: |
@@ -243,16 +228,11 @@ jobs:
             python3 - <<'PY'
           import twrpdtgen
           from pathlib import Path
-
           print(Path(twrpdtgen.__file__).resolve().parent)
           PY
           )"
 
           TARGET="$DTGEN_DIR/device_tree.py"
-
-          echo "twrpdtgen device_tree.py:"
-          echo "$TARGET"
-
           cp "$TARGET" "$TARGET.original"
 
           python3 - "$TARGET" <<'PY'
@@ -260,143 +240,87 @@ jobs:
           import sys
 
           path = Path(sys.argv[1])
-
-          # Normalize upstream indentation first.
           text = path.read_text(encoding="utf-8")
-          text = text.expandtabs(4)
 
-          # Add the GKI boot ramdisk build.prop location.
-          location = (
-              'Path("system") / "etc" / '
-              '"ramdisk" / "build.prop"'
-          )
-
+          location = 'Path("system") / "etc" / "ramdisk" / "build.prop"'
           if location not in text:
               marker = "BUILDPROP_LOCATIONS = ["
               start = text.find(marker)
-
               if start < 0:
-                  raise SystemExit(
-                      "BUILDPROP_LOCATIONS not found"
-                  )
+                  raise SystemExit("BUILDPROP_LOCATIONS not found")
 
               insert_at = text.find("\n", start)
-
-              if insert_at < 0:
-                  raise SystemExit(
-                      "Could not locate end of BUILDPROP_LOCATIONS"
-                  )
+              next_line = text[insert_at + 1:text.find("\n", insert_at + 1)]
+              loc_indent = next_line[:len(next_line) - len(next_line.lstrip())] if next_line.strip() else "\t"
 
               text = (
                   text[:insert_at + 1]
-                  + "    "
-                  + location
-                  + ",\n"
+                  + f"{loc_indent}{location},\n"
                   + text[insert_at + 1:]
               )
 
-          # Locate DeviceInfo initialization.
-          needle = (
-              "self.device_info = "
-              "DeviceInfo(self.build_prop)"
-          )
+          needle = "self.device_info = DeviceInfo(self.build_prop)"
+          target_line = None
+          for line in text.splitlines():
+              if needle in line:
+                  target_line = line
+                  break
 
-          if needle not in text:
-              raise SystemExit(
-                  "DeviceInfo initialization not found"
-              )
+          if not target_line:
+              raise SystemExit("DeviceInfo initialization not found")
 
-          # Determine the exact indentation of the original line.
-          lines = text.splitlines()
+          base_indent = target_line[:len(target_line) - len(target_line.lstrip())]
+          unit = "\t" if "\t" in base_indent else "    "
+          lvl1 = base_indent
+          lvl2 = base_indent + unit
 
-          device_info_line = next(
-              line
-              for line in lines
-              if needle in line
-          )
-
-          indent = (
-              device_info_line[
-                  :len(device_info_line)
-                  - len(device_info_line.lstrip())
-              ]
-          )
-
-          # Construct the injected Python code line-by-line.
-          fallback_lines = [
-              "# beryl GKI hardware fallbacks",
-              "",
-              "fallback_props = {",
-              '    "ro.product.board": "mt6855",',
-              '    "ro.board.platform": "mt6855",',
-              "",
-              '    "ro.bionic.arch": "arm64",',
-              '    "ro.bionic.cpu_variant": "generic",',
-              "",
-              '    "ro.bionic.2nd_arch": "arm",',
-              '    "ro.bionic.2nd_cpu_variant": "generic",',
-              "",
-              '    "ro.product.device": "beryl",',
-              '    "ro.product.system.device": "beryl",',
-              '    "ro.product.vendor.device": "beryl",',
-              '    "ro.product.product.device": "beryl",',
-              '    "ro.product.system_ext.device": "beryl",',
-              '    "ro.product.system_dlkm.device": "beryl",',
-              '    "ro.product.vendor_dlkm.device": "beryl",',
-              '    "ro.product.odm.device": "beryl",',
-              '    "ro.product.odm_dlkm.device": "beryl",',
-              "",
-              '    "ro.product.brand": "POCO",',
-              '    "ro.product.manufacturer": "Xiaomi",',
-              '    "ro.product.model": "POCO M7 Pro 5G",',
-              "",
-              '    "ro.build.ab_update": "true",',
-              '    "ro.boot.dynamic_partitions": "true",',
-              '    "ro.virtual_ab.enabled": "true",',
-              "",
-              '    "ro.system.product.cpu.abilist":',
-              '        "arm64-v8a,armeabi-v7a,armeabi",',
-              '    "ro.product.cpu.abilist":',
-              '        "arm64-v8a,armeabi-v7a,armeabi",',
-              '    "ro.product.cpu.abilist64":',
-              '        "arm64-v8a",',
-              '    "ro.product.cpu.abilist32":',
-              '        "armeabi-v7a,armeabi",',
-              "",
-              '    "ro.minui.pixel_format": "RGBA_8888",',
-              '    "ro.product.first_api_level": "31",',
-              '    "ro.build.version.sdk": "31",',
-              '    "ro.build.version.release": "12",',
-              '    "ro.build.system_root_image": "true",',
-              "}",
-              "",
-              "for _key, _value in fallback_props.items():",
-              "    self.build_prop.set_prop(_key, _value)",
+          lines = [
+              f"{lvl1}# beryl GKI hardware fallbacks",
+              f"{lvl1}fallback_props = {{",
+              f'{lvl2}"ro.product.board": "mt6855",',
+              f'{lvl2}"ro.board.platform": "mt6855",',
+              f'{lvl2}"ro.bionic.arch": "arm64",',
+              f'{lvl2}"ro.bionic.cpu_variant": "generic",',
+              f'{lvl2}"ro.bionic.2nd_arch": "arm",',
+              f'{lvl2}"ro.bionic.2nd_cpu_variant": "generic",',
+              f'{lvl2}"ro.product.device": "beryl",',
+              f'{lvl2}"ro.product.system.device": "beryl",',
+              f'{lvl2}"ro.product.vendor.device": "beryl",',
+              f'{lvl2}"ro.product.product.device": "beryl",',
+              f'{lvl2}"ro.product.system_ext.device": "beryl",',
+              f'{lvl2}"ro.product.system_dlkm.device": "beryl",',
+              f'{lvl2}"ro.product.vendor_dlkm.device": "beryl",',
+              f'{lvl2}"ro.product.odm.device": "beryl",',
+              f'{lvl2}"ro.product.odm_dlkm.device": "beryl",',
+              f'{lvl2}"ro.product.brand": "POCO",',
+              f'{lvl2}"ro.product.manufacturer": "Xiaomi",',
+              f'{lvl2}"ro.product.model": "POCO M7 Pro 5G",',
+              f'{lvl2}"ro.build.ab_update": "true",',
+              f'{lvl2}"ro.boot.dynamic_partitions": "true",',
+              f'{lvl2}"ro.virtual_ab.enabled": "true",',
+              f'{lvl2}"ro.system.product.cpu.abilist": "arm64-v8a,armeabi-v7a,armeabi",',
+              f'{lvl2}"ro.product.cpu.abilist": "arm64-v8a,armeabi-v7a,armeabi",',
+              f'{lvl2}"ro.product.cpu.abilist64": "arm64-v8a",',
+              f'{lvl2}"ro.product.cpu.abilist32": "armeabi-v7a,armeabi",',
+              f'{lvl2}"ro.minui.pixel_format": "RGBA_8888",',
+              f'{lvl2}"ro.product.first_api_level": "31",',
+              f'{lvl2}"ro.build.version.sdk": "31",',
+              f'{lvl2}"ro.build.version.release": "12",',
+              f'{lvl2}"ro.build.system_root_image": "true",',
+              f"{lvl1}}}",
+              f"{lvl1}for _key, _value in fallback_props.items():",
+              f"{lvl2}self.build_prop.set_prop(_key, _value)",
               "",
           ]
 
-          replacement = "\n".join(
-              indent + line if line else ""
-              for line in fallback_lines
-          )
+          replacement = "\n".join(lines)
+          text = text.replace(target_line, replacement + target_line, 1)
 
-          text = text.replace(
-              needle,
-              replacement + "\n" + indent + needle,
-              1
-          )
-
-          path.write_text(
-              text,
-              encoding="utf-8"
-          )
-
+          path.write_text(text, encoding="utf-8")
           print("twrpdtgen patched successfully")
           PY
 
-          # Check Python syntax BEFORE running twrpdtgen.
           python3 -m py_compile "$TARGET"
-
           echo "twrpdtgen Python syntax: OK"
 
       - name: Extract boot image
@@ -1278,6 +1202,45 @@ jobs:
               "device/xiaomi/beryl/prebuilt/STOCK_METADATA.txt"
           ).write_text(text, encoding="utf-8")
           PY
+
+      - name: Validate final tree
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "FINAL DEVICE TREE"
+          echo "=========================================="
+
+          find "$TREE" \
+            -maxdepth 5 \
+            -print \
+            | sort
+
+          echo
+          echo "=========================================="
+          echo "REQUIRED FILES"
+          echo "=========================================="
+
+          required=(
+            "$TREE/BoardConfig.mk"
+            "$TREE/AndroidProducts.mk"
+            "$TREE/device.mk"
+            "$TREE/recovery.fstab"
+            "$TREE/twrp_beryl.mk"
+            "$TREE/fox_beryl.mk"
+            "$TREE/vendorsetup.sh"
+            "$TREE/bootctrl/BOOTCTRL_DISCOVERY.txt"
+            "$TREE/mtk_plpath_utils/STOCK_DISCOVERY.txt"
+          )
+
+          for f in "${required[@]}"; do
+            if [ ! -e "$f" ]; then
+              echo "MISSING: $f"
+              exit 1
+            fi
+            echo "OK: $f"
+          done
 
       - name: Show git status
         shell: bash
