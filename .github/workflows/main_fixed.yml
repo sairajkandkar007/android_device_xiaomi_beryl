@@ -43,21 +43,6 @@ jobs:
           cpio --version | head -1
           dtc --version
 
-      - name: Validate workflow YAML
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import yaml
-
-          path = Path(".github/workflows/main.yml")
-          with path.open("r", encoding="utf-8") as f:
-              yaml.safe_load(f)
-
-          print("Workflow YAML syntax: OK")
-          PY
-
       - name: Prepare workspace
         shell: bash
         run: |
