@@ -72,6 +72,8 @@ jobs:
               --retry 10 \
               --retry-delay 5 \
               --connect-timeout 30 \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36" \
+              -H "Referer: https://pixeldrain.com/u/$id" \
               --output "stock/$name" \
               "https://pixeldrain.com/api/file/$id?download"
 
@@ -242,110 +244,78 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text(encoding="utf-8")
 
-          location = (
-              'Path("system") / "etc" / '
-              '"ramdisk" / "build.prop"'
-          )
+          # Normalize tabs across file to prevent indentation mismatch
+          text = text.expandtabs(4)
 
+          location = 'Path("system") / "etc" / "ramdisk" / "build.prop"'
           if location not in text:
               marker = "BUILDPROP_LOCATIONS = ["
               start = text.find(marker)
-
               if start < 0:
                   raise SystemExit("BUILDPROP_LOCATIONS not found")
 
               insert_at = text.find("\n", start)
-
               text = (
                   text[:insert_at + 1]
-                  + "    "
-                  + location
-                  + ",\n"
+                  + f"    {location},\n"
                   + text[insert_at + 1:]
               )
 
-          needle = (
-              "self.device_info = "
-              "DeviceInfo(self.build_prop)"
-          )
+          needle = "self.device_info = DeviceInfo(self.build_prop)"
+          target_line = None
+          for line in text.splitlines():
+              if needle in line:
+                  target_line = line
+                  break
 
-          if needle not in text:
-              raise SystemExit(
-                  "DeviceInfo initialization not found"
-              )
+          if not target_line:
+              raise SystemExit("DeviceInfo initialization not found")
 
-          replacement = """
-                  # beryl GKI hardware fallbacks
+          base_indent = target_line[:len(target_line) - len(target_line.lstrip())]
+          lvl1 = base_indent
+          lvl2 = base_indent + "    "
 
-                  fallback_props = {
-                      "ro.product.board": "mt6855",
-                      "ro.board.platform": "mt6855",
+          lines = [
+              f"{lvl1}# beryl GKI hardware fallbacks",
+              f"{lvl1}fallback_props = {{",
+              f'{lvl2}"ro.product.board": "mt6855",',
+              f'{lvl2}"ro.board.platform": "mt6855",',
+              f'{lvl2}"ro.bionic.arch": "arm64",',
+              f'{lvl2}"ro.bionic.cpu_variant": "generic",',
+              f'{lvl2}"ro.bionic.2nd_arch": "arm",',
+              f'{lvl2}"ro.bionic.2nd_cpu_variant": "generic",',
+              f'{lvl2}"ro.product.device": "beryl",',
+              f'{lvl2}"ro.product.system.device": "beryl",',
+              f'{lvl2}"ro.product.vendor.device": "beryl",',
+              f'{lvl2}"ro.product.product.device": "beryl",',
+              f'{lvl2}"ro.product.system_ext.device": "beryl",',
+              f'{lvl2}"ro.product.system_dlkm.device": "beryl",',
+              f'{lvl2}"ro.product.vendor_dlkm.device": "beryl",',
+              f'{lvl2}"ro.product.odm.device": "beryl",',
+              f'{lvl2}"ro.product.odm_dlkm.device": "beryl",',
+              f'{lvl2}"ro.product.brand": "POCO",',
+              f'{lvl2}"ro.product.manufacturer": "Xiaomi",',
+              f'{lvl2}"ro.product.model": "POCO M7 Pro 5G",',
+              f'{lvl2}"ro.build.ab_update": "true",',
+              f'{lvl2}"ro.boot.dynamic_partitions": "true",',
+              f'{lvl2}"ro.virtual_ab.enabled": "true",',
+              f'{lvl2}"ro.system.product.cpu.abilist": "arm64-v8a,armeabi-v7a,armeabi",',
+              f'{lvl2}"ro.product.cpu.abilist": "arm64-v8a,armeabi-v7a,armeabi",',
+              f'{lvl2}"ro.product.cpu.abilist64": "arm64-v8a",',
+              f'{lvl2}"ro.product.cpu.abilist32": "armeabi-v7a,armeabi",',
+              f'{lvl2}"ro.minui.pixel_format": "RGBA_8888",',
+              f'{lvl2}"ro.product.first_api_level": "31",',
+              f'{lvl2}"ro.build.version.sdk": "31",',
+              f'{lvl2}"ro.build.version.release": "12",',
+              f'{lvl2}"ro.build.system_root_image": "true",',
+              f"{lvl1}}}",
+              f"{lvl1}for _key, _value in fallback_props.items():",
+              f"{lvl2}self.build_prop.set_prop(_key, _value)",
+              "",
+          ]
 
-                      "ro.bionic.arch": "arm64",
-                      "ro.bionic.cpu_variant": "generic",
-
-                      "ro.bionic.2nd_arch": "arm",
-                      "ro.bionic.2nd_cpu_variant": "generic",
-
-                      "ro.product.device": "beryl",
-                      "ro.product.system.device": "beryl",
-                      "ro.product.vendor.device": "beryl",
-                      "ro.product.product.device": "beryl",
-                      "ro.product.system_ext.device": "beryl",
-                      "ro.product.system_dlkm.device": "beryl",
-                      "ro.product.vendor_dlkm.device": "beryl",
-                      "ro.product.odm.device": "beryl",
-                      "ro.product.odm_dlkm.device": "beryl",
-
-                      "ro.product.brand": "POCO",
-                      "ro.product.manufacturer": "Xiaomi",
-                      "ro.product.model": "POCO M7 Pro 5G",
-
-                      "ro.build.ab_update": "true",
-                      "ro.boot.dynamic_partitions": "true",
-                      "ro.virtual_ab.enabled": "true",
-
-                      "ro.system.product.cpu.abilist":
-                          "arm64-v8a,armeabi-v7a,armeabi",
-
-                      "ro.product.cpu.abilist":
-                          "arm64-v8a,armeabi-v7a,armeabi",
-
-                      "ro.product.cpu.abilist64":
-                          "arm64-v8a",
-
-                      "ro.product.cpu.abilist32":
-                          "armeabi-v7a,armeabi",
-
-                      "ro.minui.pixel_format":
-                          "RGBA_8888",
-
-                      "ro.product.first_api_level":
-                          "31",
-
-                      "ro.build.version.sdk":
-                          "31",
-
-                      "ro.build.version.release":
-                          "12",
-
-                      "ro.build.system_root_image":
-                          "true",
-                  }
-
-                  for _key, _value in fallback_props.items():
-                      self.build_prop.set_prop(
-                          _key,
-                          _value
-                      )
-
-          """
-
-          text = text.replace(
-              needle,
-              replacement + needle,
-              1
-          )
+          replacement = "\n".join(lines)
+          text = text.replace(target_line, replacement + target_line, 1)
 
           path.write_text(text, encoding="utf-8")
           print("twrpdtgen patched successfully")
