@@ -49,39 +49,25 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install host tools
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install analysis tools
+        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y lz4
-          python3 --version
+          sudo apt-get install -y lz4 xz-utils unzip p7zip-full
+          echo "Installing payload-dumper-go..."
+          go install github.com/ssut/payload-dumper-go@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          export PATH="$(go env GOPATH)/bin:$PATH"
           lz4 --version
+          payload-dumper-go --help | head -40
 
-      - name: Select ROM URL
-        id: input
-        shell: bash
-        env:
-          INPUT_URL: ${{ inputs.rom_url }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${INPUT_URL}" ]]; then
-            URL="${INPUT_URL}"
-          elif [[ -n "${STOCK_ROM_URL}" ]]; then
-            URL="${STOCK_ROM_URL}"
-          else
-            echo "::error::No ROM URL supplied. Use Run workflow -> rom_url, or define the STOCK_ROM_URL repository variable."
-            exit 1
-          fi
-          {
-            echo "url<<EOF"
-            echo "$URL"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-          echo "ROM URL selected."
-
-      # The complete analyzer is embedded below. The workflow is therefore
-      # self-contained and does not depend on rom_analyzer.py being committed
-      # separately in the repository.
+      # The complete analyzer is embedded below. The repository only needs this YAML file.
       - name: Create embedded rom_analyzer.py
         shell: bash
         run: |
@@ -89,501 +75,284 @@ jobs:
           cat > rom_analyzer.py <<'PY_ANALYZER'
           #!/usr/bin/env python3
           """
-          POCO M7 Pro 5G (beryl) stock ROM analyzer.
+          POCO M7 Pro 5G (beryl) stock ROM analyzer - workflow-safe edition.
           
-          Purpose:
-            - Download or accept a local stock ROM/archive.
-            - Safely extract ZIP/TAR.GZ/GZIP archives.
-            - Inspect Android boot/vendor_boot images.
-            - Extract vendor_boot ramdisk when the host has the `lz4` utility.
-            - Parse newc CPIO ramdisks with Python stdlib.
-            - Inventory Beryl/MT6855 recovery configuration, fstabs, init rc, DTB,
-              kernel modules, SELinux files and encryption-related files.
-            - Produce evidence-based reports. It does NOT blindly copy stock binaries
-              into a device tree.
+          The analyzer is intentionally evidence-first. It can:
+            * download a Xiaomi ROM ZIP
+            * recursively extract ZIP/TAR/GZIP archives
+            * detect Android boot/vendor_boot images by magic
+            * extract vendor_boot v3/v4 ramdisk fragments and DTB
+            * decompress LZ4 ramdisks and parse newc CPIO
+            * detect payload.bin and invoke payload-dumper-go when available
+            * re-scan images produced from payload.bin
+            * produce a report and fail when no Android image/payload evidence is found
           
-          Usage:
-            python3 rom_analyzer.py <URL-or-local-file> [output_dir]
-          
-          Environment:
-            ROM_URL may be used instead of argv[1].
+          It does not blindly copy stock binaries into a device tree.
           """
           from __future__ import annotations
-          import argparse, hashlib, json, os, re, shutil, stat, subprocess, sys, tarfile, tempfile, time, urllib.request, zipfile
+          import argparse, hashlib, json, os, re, shutil, stat, subprocess, sys, tarfile, urllib.request, zipfile
           from collections import Counter
           from datetime import datetime, timezone
           from pathlib import Path
           
-          DEVICE = "beryl"
-          SOC = "mt6855"
-          OUTPUT_DEFAULT = "rom_analysis_output"
-          MAX_ARCHIVE_DEPTH = 5
-          CHUNK = 4 * 1024 * 1024
+          DEVICE="beryl"; SOC="mt6855"; CHUNK=4*1024*1024; MAX_ARCHIVE_DEPTH=6
           
-          def log(msg=""):
-              print(msg, flush=True)
-          
-          def sha256(path: Path):
+          def log(s=""): print(s, flush=True)
+          def sha256(p):
               h=hashlib.sha256()
-              with path.open("rb") as f:
+              with open(p,"rb") as f:
                   while True:
                       b=f.read(CHUNK)
                       if not b: break
                       h.update(b)
               return h.hexdigest()
-          
-          def safe_member_path(base: Path, name: str) -> Path:
-              name=name.replace("\\","/")
-              p=Path(name)
-              if p.is_absolute() or ".." in p.parts:
-                  raise ValueError(f"unsafe archive path: {name}")
-              dest=(base/p).resolve()
-              if base.resolve() not in dest.parents and dest != base.resolve():
-                  raise ValueError(f"archive traversal: {name}")
-              return dest
-          
-          def safe_extract_zip(zf: Path, dest: Path):
-              count=0
-              with zipfile.ZipFile(zf) as z:
-                  for info in z.infolist():
-                      target=safe_member_path(dest, info.filename)
-                      if info.is_dir():
-                          target.mkdir(parents=True, exist_ok=True); continue
-                      target.parent.mkdir(parents=True, exist_ok=True)
-                      with z.open(info) as src, target.open("wb") as dst:
-                          shutil.copyfileobj(src,dst,CHUNK)
-                      count+=1
-              return count
-          
-          def safe_extract_tar(tf: Path, dest: Path):
-              count=0
-              with tarfile.open(tf,"r:*") as t:
+          def safe(base,name):
+              name=name.replace('\\','/')
+              q=Path(name)
+              if q.is_absolute() or '..' in q.parts: raise ValueError('unsafe path: '+name)
+              d=(base/q).resolve(); br=base.resolve()
+              if d!=br and br not in d.parents: raise ValueError('archive traversal: '+name)
+              return d
+          def extract_zip(src,dst):
+              n=0
+              with zipfile.ZipFile(src) as z:
+                  for i in z.infolist():
+                      d=safe(dst,i.filename)
+                      if i.is_dir(): d.mkdir(parents=True,exist_ok=True); continue
+                      d.parent.mkdir(parents=True,exist_ok=True)
+                      with z.open(i) as a, open(d,'wb') as b: shutil.copyfileobj(a,b,CHUNK)
+                      n+=1
+              return n
+          def extract_tar(src,dst):
+              n=0
+              with tarfile.open(src,'r:*') as t:
                   for m in t.getmembers():
-                      target=safe_member_path(dest,m.name)
-                      if m.isdir():
-                          target.mkdir(parents=True,exist_ok=True); continue
-                      if not (m.isfile() or m.isreg()):
-                          continue
-                      target.parent.mkdir(parents=True,exist_ok=True)
-                      src=t.extractfile(m)
-                      if src:
-                          with src, target.open("wb") as dst:
-                              shutil.copyfileobj(src,dst,CHUNK)
-                          try: os.chmod(target, m.mode & 0o777)
-                          except OSError: pass
-                          count+=1
-              return count
-          
-          def download(url: str, dest: Path):
-              req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 BerylStockAnalyzer/1.0"})
-              tmp=dest.with_suffix(dest.suffix+".part")
-              log(f"Downloading: {url}")
-              with urllib.request.urlopen(req,timeout=60) as r, tmp.open("wb") as f:
-                  total=int(r.headers.get("Content-Length") or 0)
-                  done=0
+                      d=safe(dst,m.name)
+                      if m.isdir(): d.mkdir(parents=True,exist_ok=True); continue
+                      if not m.isfile(): continue
+                      d.parent.mkdir(parents=True,exist_ok=True)
+                      x=t.extractfile(m)
+                      if x:
+                          with x,open(d,'wb') as b: shutil.copyfileobj(x,b,CHUNK)
+                          n+=1
+              return n
+          def archive_kind(p):
+              try:
+                  with open(p,'rb') as f: m=f.read(8)
+              except: return None
+              if m.startswith(b'PK\x03\x04'): return 'zip'
+              if m.startswith(b'\x1f\x8b'): return 'gzip'
+              return None
+          def extract_archive(p,d):
+              k=archive_kind(p)
+              if k=='zip': return extract_zip(p,d)
+              if k=='gzip':
+                  try: return extract_tar(p,d)
+                  except tarfile.ReadError:
+                      import gzip
+                      out=d/(p.stem+'.out'); out.parent.mkdir(parents=True,exist_ok=True)
+                      with gzip.open(p,'rb') as a,open(out,'wb') as b: shutil.copyfileobj(a,b,CHUNK)
+                      return 1
+              return 0
+          def download(url,dst):
+              req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 BerylStockAnalyzer/2.0','Accept':'*/*'})
+              part=dst.with_suffix('.part')
+              with urllib.request.urlopen(req,timeout=120) as r,open(part,'wb') as f:
+                  total=int(r.headers.get('Content-Length') or 0); done=0
                   while True:
                       b=r.read(CHUNK)
                       if not b: break
                       f.write(b); done+=len(b)
-                      if total:
-                          print(f"\r  {done/2**30:.2f}/{total/2**30:.2f} GiB",end="",flush=True)
+                      if total: print(f'\r  {done/2**30:.2f}/{total/2**30:.2f} GiB',end='',flush=True)
               if total: print()
-              tmp.replace(dest)
-              return dest
+              part.replace(dst)
+              return dst
           
-          def archive_kind(path: Path):
-              with path.open("rb") as f: magic=f.read(8)
-              if magic.startswith(b"PK\x03\x04"): return "zip"
-              if magic.startswith(b"\x1f\x8b"): return "gzip"
-              if magic.startswith(b"ustar") or path.suffixes[-2:]==[".tar",".gz"]: return "tar"
+          def u32(b,o): return int.from_bytes(b[o:o+4],'little')
+          def u64(b,o): return int.from_bytes(b[o:o+8],'little')
+          def align(n,p): return ((n+p-1)//p)*p
+          
+          def parse_image(p):
+              with open(p,'rb') as f: h=f.read(4096)
+              if h[:8]==b'ANDROID!':
+                  hv=u32(h,40); return {'type':'boot','header_version':hv,'page_size':u32(h,36),'kernel_size':u32(h,8),'ramdisk_size':u32(h,12)}
+              if h[:8]==b'VNDRBOOT':
+                  hv=u32(h,8); out={'type':'vendor_boot','header_version':hv,'page_size':u32(h,12),'vendor_ramdisk_size':u32(h,24)}
+                  if len(h)>=2112:
+                      out.update(header_size=u32(h,2096),dtb_size=u32(h,2100),dtb_addr=u64(h,2104))
+                  if hv>=4 and len(h)>=2128:
+                      out.update(vendor_ramdisk_table_size=u32(h,2112),vendor_ramdisk_table_entry_num=u32(h,2116),vendor_ramdisk_table_entry_size=u32(h,2120),bootconfig_size=u32(h,2124))
+                  return out
+              if h[:4]==b'\x3a\xff\x26\xed': return {'type':'android_sparse'}
               return None
           
-          def extract_archive(path: Path, dest: Path):
-              kind=archive_kind(path)
-              if kind=="zip":
-                  return safe_extract_zip(path,dest)
-              if kind in ("tar","gzip"):
-                  try:
-                      return safe_extract_tar(path,dest)
-                  except tarfile.ReadError:
-                      # plain gzip
-                      import gzip
-                      out=dest/(path.stem if path.suffix==".gz" else path.name+".out")
-                      with gzip.open(path,"rb") as src, out.open("wb") as dst:
-                          shutil.copyfileobj(src,dst,CHUNK)
-                      return 1
-              return 0
-          
-          def find_files(root: Path, suffix=None):
-              for p in root.rglob("*"):
-                  if p.is_file() and (suffix is None or p.name.lower().endswith(suffix)):
-                      yield p
-          
-          def u32(b, off): return int.from_bytes(b[off:off+4],"little")
-          def u64(b, off): return int.from_bytes(b[off:off+8],"little")
-          
-          def parse_boot(path: Path):
-              with path.open("rb") as f: h=f.read(4096)
-              if h[:8] != b"ANDROID!": return None
-              header_version=u32(h,40)
-              page_size=u32(h,36)
-              # v3/v4 common header fields
-              kernel_size=u32(h,8)
-              ramdisk_size=u32(h,12)
-              out={"type":"boot","header_version":header_version,"page_size":page_size,
-                   "kernel_size":kernel_size,"ramdisk_size":ramdisk_size}
-              if header_version >= 4 and len(h)>=1584:
-                  out["signature_size"]=u32(h,1580)
-              return out
-          
-          def parse_vendor_boot(path: Path):
-              with path.open("rb") as f: h=f.read(4096)
-              if h[:8] != b"VNDRBOOT": return None
-              hv=u32(h,8); ps=u32(h,12); ramdisk_size=u32(h,24)
-              out={"type":"vendor_boot","header_version":hv,"page_size":ps,
-                   "vendor_ramdisk_size":ramdisk_size}
-              # vendor_boot_img_hdr_v3/v4 layout: header_size at 2096, dtb_size at 2100,
-              # dtb_addr at 2104; v4 table fields begin at 2112.
-              if len(h)>=2112:
-                  out["header_size"]=u32(h,2096)
-                  out["dtb_size"]=u32(h,2100)
-                  out["dtb_addr"]=u64(h,2104)
-              if hv>=4 and len(h)>=2128:
-                  out["vendor_ramdisk_table_size"]=u32(h,2112)
-                  out["vendor_ramdisk_table_entry_num"]=u32(h,2116)
-                  out["vendor_ramdisk_table_entry_size"]=u32(h,2120)
-                  out["bootconfig_size"]=u32(h,2124)
-              return out
-          
-          def aligned(n,p): return ((n+p-1)//p)*p
-          
-          def extract_vendor_ramdisk(img: Path, outdir: Path):
-              meta=parse_vendor_boot(img)
-              if not meta: return None
-              ps=meta["page_size"]; hsize=meta.get("header_size",ps)
-              start=aligned(hsize,ps)
-              size=meta["vendor_ramdisk_size"]
-              outdir.mkdir(parents=True,exist_ok=True)
-              with img.open("rb") as f:
-                  f.seek(start); data=f.read(size)
-                  # Save DTB separately when the header advertises one.
-                  dtb_size=meta.get("dtb_size",0)
-                  if dtb_size:
-                      f.seek(start+aligned(size,ps)); dtb=f.read(dtb_size)
-                      (outdir/"stock.dtb").write_bytes(dtb)
-                  # Save the v4 vendor ramdisk table for evidence.
-                  if meta.get("header_version",0)>=4 and meta.get("vendor_ramdisk_table_size",0):
-                      table_off=start+aligned(size,ps)+aligned(dtb_size,ps)
-                      f.seek(table_off); table=f.read(meta["vendor_ramdisk_table_size"])
-                      (outdir/"vendor_ramdisk_table.bin").write_bytes(table)
-                      entry_size=meta.get("vendor_ramdisk_table_entry_size",0)
-                      entries=[]
-                      if entry_size>=108:
-                          for i in range(meta.get("vendor_ramdisk_table_entry_num",0)):
-                              e=table[i*entry_size:(i+1)*entry_size]
-                              if len(e)<108: break
-                              name=e[12:44].split(b"\0",1)[0].decode("utf-8","replace")
-                              entries.append({"index":i,"ramdisk_size":u32(e,0),"ramdisk_offset":u32(e,4),"ramdisk_type":u32(e,8),"name":name})
-                      (outdir/"vendor_ramdisk_table.json").write_text(json.dumps(entries,indent=2))
-              raw=outdir/"vendor_ramdisk.lz4"
-              raw.write_bytes(data)
-              return raw
-          
-          def run(cmd, timeout=300):
+          def run(cmd,timeout=900):
               try:
-                  p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
+                  p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout,text=True)
                   return p.returncode,p.stdout,p.stderr
-              except (OSError,subprocess.TimeoutExpired) as e:
-                  return 127,b"",str(e).encode()
+              except Exception as e: return 127,'',str(e)
           
-          def decompress_lz4(src: Path, dst: Path):
-              # Android vendor_boot ramdisks are commonly LZ4-compressed. Prefer lz4 CLI.
-              lz4=shutil.which("lz4")
-              if not lz4:
-                  return False, "lz4 executable not found"
-              rc,_,err=run([lz4,"-d","-f",str(src),str(dst)],timeout=600)
-              return rc==0, err.decode(errors="replace")
+          def extract_vendor_boot(img,out):
+              m=parse_image(img)
+              if not m or m['type']!='vendor_boot': return None
+              out.mkdir(parents=True,exist_ok=True); ps=m['page_size']; hs=m.get('header_size',ps); start=align(hs,ps); size=m['vendor_ramdisk_size']
+              with open(img,'rb') as f:
+                  f.seek(start); blob=f.read(size); raw=out/'vendor_ramdisk.lz4'; raw.write_bytes(blob)
+                  dtbs=m.get('dtb_size',0)
+                  if dtbs:
+                      f.seek(start+align(size,ps)); (out/'stock.dtb').write_bytes(f.read(dtbs))
+                  if m.get('header_version',0)>=4 and m.get('vendor_ramdisk_table_size',0):
+                      off=start+align(size,ps)+align(dtbs,ps); f.seek(off); t=f.read(m['vendor_ramdisk_table_size']); (out/'vendor_ramdisk_table.bin').write_bytes(t)
+                      es=m.get('vendor_ramdisk_table_entry_size',0); entries=[]
+                      for i in range(m.get('vendor_ramdisk_table_entry_num',0)):
+                          e=t[i*es:(i+1)*es]
+                          if len(e)<108: break
+                          entries.append({'index':i,'size':u32(e,0),'offset':u32(e,4),'type':u32(e,8),'name':e[12:44].split(b'\0',1)[0].decode(errors='replace')})
+                      (out/'vendor_ramdisk_table.json').write_text(json.dumps(entries,indent=2))
+              lz4=shutil.which('lz4')
+              if not lz4: return {'meta':m,'raw':str(raw),'lz4':False,'error':'lz4 not installed'}
+              cpio=out/'vendor_ramdisk.cpio'; rc,_,err=run([lz4,'-d','-f',str(raw),str(cpio)],900)
+              if rc!=0: return {'meta':m,'raw':str(raw),'lz4':False,'error':err[-2000:]}
+              rd=out/'ramdisk'; rd.mkdir(exist_ok=True)
+              try: count=cpio_extract(cpio,rd)
+              except Exception as e: return {'meta':m,'raw':str(raw),'cpio':str(cpio),'lz4':True,'cpio_error':str(e)}
+              return {'meta':m,'raw':str(raw),'cpio':str(cpio),'ramdisk':str(rd),'lz4':True,'cpio_files':count}
           
-          def cpio_newc_extract(src: Path, dest: Path):
+          def cpio_extract(src,dst):
               data=src.read_bytes(); pos=0; count=0
-              while pos+110 <= len(data):
-                  if data[pos:pos+6] not in (b"070701",b"070702"):
-                      raise ValueError(f"invalid CPIO newc header at {pos}")
-                  def field(o): return int(data[pos+o:pos+o+8],16)
-                  namesz=field(94); filesize=field(54); mode=field(14)
-                  name_start=pos+110
-                  name_end=name_start+namesz
-                  name=data[name_start:name_end]
-                  if not name.endswith(b"\0"): raise ValueError("invalid CPIO name")
-                  name=name[:-1].decode("utf-8","replace")
-                  data_start=(name_end+3)&~3
-                  data_end=data_start+filesize
-                  next_pos=(data_end+3)&~3
-                  if name=="TRAILER!!!": break
-                  target=safe_member_path(dest,name)
-                  target.parent.mkdir(parents=True,exist_ok=True)
-                  if stat.S_ISDIR(mode):
-                      target.mkdir(exist_ok=True)
+              while pos+110<=len(data):
+                  magic=data[pos:pos+6]
+                  if magic not in (b'070701',b'070702'): raise ValueError(f'bad newc header at {pos}: {magic!r}')
+                  def fld(o): return int(data[pos+o:pos+o+8],16)
+                  mode=fld(14); size=fld(54); namesz=fld(94); ns=pos+110; ne=ns+namesz
+                  if ne>len(data): raise ValueError('truncated cpio name')
+                  name=data[ns:ne].rstrip(b'\0').decode('utf-8','replace'); ds=(ne+3)&~3; de=ds+size; pos=(de+3)&~3
+                  if name=='TRAILER!!!': break
+                  target=safe(dst,name); target.parent.mkdir(parents=True,exist_ok=True)
+                  if stat.S_ISDIR(mode): target.mkdir(exist_ok=True)
                   elif stat.S_ISLNK(mode):
-                      # newc symlink payload is link target text.
-                      link_target=data[data_start:data_end].decode("utf-8","replace")
+                      link=data[ds:de].decode('utf-8','replace')
                       try: target.unlink()
-                      except FileNotFoundError: pass
-                      # keep symlinks relative/safe
-                      if os.path.isabs(link_target) or ".." in Path(link_target).parts:
-                          target.write_text(link_target)
-                      else:
-                          target.symlink_to(link_target)
+                      except: pass
+                      if os.path.isabs(link) or '..' in Path(link).parts: target.write_text(link)
+                      else: target.symlink_to(link)
                   else:
-                      target.write_bytes(data[data_start:data_end])
-                      try: os.chmod(target,mode & 0o7777)
-                      except OSError: pass
-                  count+=1; pos=next_pos
+                      target.write_bytes(data[ds:de])
+                      try: os.chmod(target,mode&0o7777)
+                      except: pass
+                  count+=1
               return count
           
-          def sha_file_inventory(root: Path):
-              rows=[]
-              for p in root.rglob("*"):
-                  if p.is_file():
-                      try: rows.append({"path":str(p.relative_to(root)),"size":p.stat().st_size})
-                      except OSError: pass
-              return rows
+          def find_payloads(root): return [p for p in root.rglob('payload.bin') if p.is_file()]
+          def extract_payload(payload,out):
+              exe=shutil.which('payload-dumper-go') or shutil.which('payload_dumper')
+              if not exe: return {'ok':False,'error':'payload-dumper-go not installed'}
+              out.mkdir(parents=True,exist_ok=True)
+              parts=os.environ.get('PAYLOAD_PARTITIONS','boot,vendor_boot,dtbo,vendor_dlkm,vbmeta,vbmeta_system,vbmeta_vendor')
+              rc,stdout,stderr=run([exe,'-o',str(out),'-p',parts,str(payload)],timeout=3600)
+              return {'ok':rc==0,'stdout':stdout[-5000:],'stderr':stderr[-5000:],'output':str(out)}
           
-          def read_text(path: Path, limit=2_000_000):
-              try:
-                  return path.read_text(errors="replace")[:limit]
-              except Exception:
-                  return ""
-          
-          def classify(rel: str):
-              n=rel.lower()
-              if n.endswith(".ko") or "/lib/modules/" in n: return "kernel_modules"
-              if n.endswith(".rc") or "/etc/init/" in n or n.startswith("init."): return "init"
-              if "fstab" in Path(n).name: return "fstab"
-              if any(x in n for x in ("file_contexts","service_contexts","hwservice_contexts","vendor_service_contexts","genfs_contexts","seapp_contexts")): return "selinux"
-              if n.endswith(".dtb") or ".dtbo" in n: return "dtb"
-              if n.endswith(".prop") or n.endswith("/build.prop"): return "properties"
-              if any(x in Path(n).name for x in ("vold","crypt","crypto","keymaster","gatekeeper","tee")): return "crypto_related"
-              return "other"
-          
-          def evidence_scan(root: Path):
-              cats=Counter(); interesting=[]
-              for p in root.rglob("*"):
+          def scan(root):
+              cats=Counter(); targets={k:[] for k in ['fstab','recovery_init','ueventd','modules_load_recovery','plpath','dtb','selinux','crypto_related','images','payload']}; files=[]
+              for p in root.rglob('*'):
                   if not p.is_file(): continue
-                  rel=str(p.relative_to(root))
-                  c=classify(rel); cats[c]+=1
-                  base=p.name.lower()
-                  if (c!="other" or base in {"adbd","fastbootd","recovery","init","ueventd.rc","modules.load.recovery",
-                                             "modules.load","modules.dep","modules.alias","modules.softdep","mtk_plpath_utils"}):
-                      interesting.append({"path":rel,"category":c,"size":p.stat().st_size})
-              return cats,interesting
-          
-          def targeted_find(root: Path):
-              names={
-                  "fstab":[], "recovery_init":[], "ueventd":[], "modules_load_recovery":[],
-                  "plpath":[], "dtb":[], "selinux":[], "crypto_related":[]
-              }
-              for p in root.rglob("*"):
-                  if not p.is_file(): continue
-                  n=p.name.lower(); rel=str(p.relative_to(root))
-                  if "fstab" in n: names["fstab"].append(rel)
-                  if n.startswith("init.recovery") or n=="recovery.rc": names["recovery_init"].append(rel)
-                  if n.startswith("ueventd"): names["ueventd"].append(rel)
-                  if n=="modules.load.recovery": names["modules_load_recovery"].append(rel)
-                  if n=="mtk_plpath_utils": names["plpath"].append(rel)
-                  if n.endswith(".dtb") or ".dtbo" in n: names["dtb"].append(rel)
-                  if classify(rel)=="selinux": names["selinux"].append(rel)
-                  if classify(rel)=="crypto_related": names["crypto_related"].append(rel)
-              return names
-          
-          def grep_text(root: Path, patterns):
-              hits=[]
-              for p in root.rglob("*"):
-                  if not p.is_file(): continue
-                  if p.suffix.lower() not in {".rc",".prop",".txt",".fstab",".conf",".te",".cil",".contexts"} and "fstab" not in p.name.lower():
-                      continue
-                  t=read_text(p,500_000)
-                  for pat in patterns:
-                      if re.search(pat,t,re.I):
-                          hits.append({"path":str(p.relative_to(root)),"pattern":pat})
-              return hits
-          
-          def write_reports(out: Path, source, extracted_root, images, archives):
-              cats,interesting=evidence_scan(extracted_root)
-              targets=targeted_find(extracted_root)
-              text_hits=grep_text(extracted_root,[
-                  r"mtk_plpath_utils",r"modules\.load\.recovery",r"inlinecrypt",r"fsverity",
-                  r"fileencryption=",r"metadata_encryption",r"avb",r"vold",r"sys\.usb\.configfs"
-              ])
-              report={
-                  "device":DEVICE,"soc":SOC,"generated_utc":datetime.now(timezone.utc).isoformat(),
-                  "source":source,"archive_count":len(archives),
-                  "images":images,"categories":dict(cats),"targeted":targets,"text_hits":text_hits,
-                  "important_files":interesting
-              }
-              ad=out/"analysis"; ad.mkdir(parents=True,exist_ok=True)
-              (ad/"analysis_report.json").write_text(json.dumps(report,indent=2))
-              lines=[
-                  "POCO M7 PRO 5G (BERYL) STOCK ROM EVIDENCE REPORT",
-                  "="*72,
-                  f"Generated UTC: {report['generated_utc']}",
-                  f"Source: {source}",
-                  f"Target: {DEVICE} / {SOC}",
-                  "",
-                  "IMPORTANT: This report records files/evidence actually found. It does",
-                  "not infer that a filename is required, and it does not recommend copying",
-                  "stock binaries blindly into the recovery device tree.",
-                  "",
-                  "ANDROID IMAGES",
-                  "-"*72
-              ]
-              if images:
-                  for x in images: lines.append(json.dumps(x,sort_keys=True))
-              else: lines.append("(none detected)")
-              lines += ["","TARGETED RECOVERY EVIDENCE","-"*72]
-              for k,v in targets.items():
-                  lines.append(f"{k}:")
-                  lines.extend(f"  - {x}" for x in v[:200])
-                  if not v: lines.append("  - (none)")
-              lines += ["","CATEGORY COUNTS","-"*72]
-              for k,v in cats.most_common(): lines.append(f"{k:20} {v}")
-              lines += ["","TEXT EVIDENCE","-"*72]
-              for h in text_hits[:500]: lines.append(f"  {h['path']} -> {h['pattern']}")
-              if not text_hits: lines.append("  (none)")
-              (ad/"ANALYSIS_REPORT.txt").write_text("\n".join(lines)+"\n")
-              # Only evidence-based prep: references/manifests, not wholesale stock copies.
-              prep=out/"device_tree_prep"; prep.mkdir(exist_ok=True)
-              manifest=prep/"EVIDENCE_MANIFEST.txt"
-              manifest.write_text("\n".join(
-                  f"{x['category']:16} {x['size']:10} {x['path']}" for x in interesting
-              )+"\n")
-              checklist=ad/"DEVICE_TREE_CHECKLIST.txt"
-              checklist.write_text("""BERYL DEVICE TREE INTEGRATION CHECKLIST
-          =======================================
-          
-          [ ] Verify vendor_boot header version/page size against stock.
-          [ ] Verify exact vendor ramdisk contents and compression.
-          [ ] Use stock fstab.mt6855/fstab.emmc/recovery.fstab as evidence.
-          [ ] Preserve A/B + dynamic-partition layout from verified stock data.
-          [ ] Verify DTB is from the same stock boot/vendor_boot/kernel generation.
-          [ ] Verify modules.load.recovery and the corresponding .ko set.
-          [ ] Verify MTK recovery init scripts and ueventd rules.
-          [ ] Verify mtk_plpath_utils and its init rc/context requirements.
-          [ ] Verify Android 14 FBE/inlinecrypt metadata-encryption entries from stock.
-          [ ] Verify required recovery binaries/libraries by dependency analysis.
-          [ ] Review SELinux contexts/policy only after identifying actual recovery files.
-          [ ] Do NOT copy all .ko/.so/.rc/.prop files into the tree automatically.
-          [ ] Do NOT enable FOX_VENDOR_BOOT_RECOVERY merely because resources are in vendor_boot.
-          [ ] Build target should initially preserve the stock vendor_boot packaging model.
-          [ ] Test boot, adb, mounts, and decryption separately.
-          """)
-              return report
+                  rel=str(p.relative_to(root)); n=p.name.lower(); files.append(rel)
+                  if n=='payload.bin': targets['payload'].append(rel)
+                  m=parse_image(p)
+                  if m: targets['images'].append({'path':rel,**m}); cats[m['type']]+=1
+                  if 'fstab' in n: targets['fstab'].append(rel); cats['fstab']+=1
+                  if n.startswith('init.recovery') or n=='recovery.rc': targets['recovery_init'].append(rel); cats['init']+=1
+                  if n.startswith('ueventd'): targets['ueventd'].append(rel); cats['ueventd']+=1
+                  if n=='modules.load.recovery': targets['modules_load_recovery'].append(rel); cats['modules']+=1
+                  if n=='mtk_plpath_utils': targets['plpath'].append(rel); cats['plpath']+=1
+                  if n.endswith('.dtb') or '.dtbo' in n: targets['dtb'].append(rel); cats['dtb']+=1
+                  if any(x in n for x in ['file_contexts','service_contexts','hwservice_contexts','vendor_service_contexts','genfs_contexts','seapp_contexts']): targets['selinux'].append(rel); cats['selinux']+=1
+                  if any(x in n for x in ['vold','crypt','crypto','keymaster','gatekeeper','tee']): targets['crypto_related'].append(rel); cats['crypto']+=1
+              return cats,targets,files
           
           def main():
-              ap=argparse.ArgumentParser()
-              ap.add_argument("source",nargs="?",help="ROM URL or local ROM/archive path")
-              ap.add_argument("output",nargs="?",default=OUTPUT_DEFAULT)
-              args=ap.parse_args()
-              source=args.source or os.environ.get("ROM_URL")
-              if not source:
-                  ap.error("ROM URL or local file is required")
-              out=Path(args.output).resolve(); out.mkdir(parents=True,exist_ok=True)
-              extracted=out/"extracted"; extracted.mkdir(exist_ok=True)
-              source_path=Path(source)
-              if re.match(r"^https?://",source,re.I):
-                  rom=out/"stock_rom.download"
-                  download(source,rom)
-                  source_desc=source
+              ap=argparse.ArgumentParser(); ap.add_argument('source'); ap.add_argument('output',nargs='?',default='rom_analysis_output'); a=ap.parse_args()
+              out=Path(a.output).resolve(); ext=out/'extracted'; out.mkdir(parents=True,exist_ok=True); ext.mkdir(exist_ok=True)
+              src=a.source
+              if re.match(r'^https?://',src,re.I):
+                  archive=out/'stock_rom.zip'; log('Downloading ROM...'); download(src,archive); source=src
               else:
-                  rom=source_path.resolve()
-                  if not rom.is_file(): raise SystemExit(f"Input file not found: {rom}")
-                  source_desc=str(rom)
-          
-              log("\nInput SHA256: "+sha256(rom))
-              archives=[]
-              first=extracted/"root"; first.mkdir(exist_ok=True)
-              n=extract_archive(rom,first)
-              if n:
-                  archives.append(str(rom))
-                  log(f"Extracted {n} top-level archive members.")
-              else:
-                  # Useful when a user passes a raw image.
-                  shutil.copy2(rom,extracted/rom.name)
-          
-              # Recursive archive extraction, bounded and safe.
+                  archive=Path(src).resolve(); source=str(archive)
+              log('SHA256: '+sha256(archive))
+              root=ext/'root'; root.mkdir(exist_ok=True)
+              if archive_kind(archive):
+                  n=extract_archive(archive,root); log(f'Extracted top-level archive members: {n}')
+              else: shutil.copy2(archive,root/archive.name)
+              archives=[str(archive)]; payload_results=[]
+              # Recursively extract nested archives first.
               for depth in range(MAX_ARCHIVE_DEPTH):
                   candidates=[]
-                  for p in extracted.rglob("*"):
-                      if not p.is_file(): continue
-                      k=archive_kind(p)
-                      if k and not str(p).startswith(str(extracted/"__archives_done")):
-                          candidates.append((p,k))
+                  for p in ext.rglob('*'):
+                      if p.is_file() and archive_kind(p) and p.name!='stock_rom.zip' and '__archive_done__' not in p.parts: candidates.append(p)
                   if not candidates: break
                   progress=False
-                  done_root=extracted/"__archives_done"/str(depth); done_root.mkdir(parents=True,exist_ok=True)
-                  for p,k in candidates:
-                      # Skip the original downloaded archive and already extracted paths.
-                      if p==rom: continue
-                      marker=done_root/(hashlib.sha1(str(p).encode()).hexdigest()+".done")
+                  for p in candidates:
+                      marker=ext/'__archive_done__'/hashlib.sha1(str(p).encode()).hexdigest(); marker.parent.mkdir(exist_ok=True)
                       if marker.exists(): continue
-                      dest=p.parent/(p.stem+"_extracted")
+                      d=p.parent/(p.stem+'_extracted')
                       try:
-                          count=extract_archive(p,dest)
-                          marker.write_text(str(count)); archives.append(str(p)); progress=True
-                          log(f"Nested {k}: {p.relative_to(extracted)} -> {count} members")
-                      except Exception as e:
-                          marker.write_text("ERROR")
-                          log(f"Warning: failed to extract {p}: {e}")
+                          n=extract_archive(p,d); marker.write_text(str(n)); archives.append(str(p)); progress=True; log(f'Nested archive: {p.relative_to(ext)} -> {n} files')
+                      except Exception as e: marker.write_text('ERR'); log(f'WARN nested archive {p}: {e}')
                   if not progress: break
-          
-              images=[]
-              for p in extracted.rglob("*"):
-                  if not p.is_file(): continue
-                  try:
-                      b=p.read_bytes()[:8]
-                  except Exception: continue
-                  if b==b"ANDROID!":
-                      images.append({"path":str(p.relative_to(extracted)),"format":"boot","header":parse_boot(p)})
-                  elif b==b"VNDRBOOT":
-                      meta=parse_vendor_boot(p)
-                      item={"path":str(p.relative_to(extracted)),"format":"vendor_boot","header":meta}
-                      ram=extract_vendor_ramdisk(p,extracted/"__vendor_boot"/p.stem)
-                      if ram:
-                          item["ramdisk_raw"]=str(ram.relative_to(extracted))
-                          cpio=ram.with_suffix(".cpio")
-                          ok,err=decompress_lz4(ram,cpio)
-                          item["lz4_decompressed"]=ok
-                          if ok:
-                              rd=ram.parent/"ramdisk"; rd.mkdir(exist_ok=True)
-                              try:
-                                  item["cpio_files"]=cpio_newc_extract(cpio,rd)
-                                  item["ramdisk_root"]=str(rd.relative_to(extracted))
-                              except Exception as e: item["cpio_error"]=str(e)
-                          else: item["lz4_error"]=err
-                      images.append(item)
-                  elif b[:4]==b"\x3a\xff\x26\xed":
-                      images.append({"path":str(p.relative_to(extracted)),"format":"android_sparse_image"})
-              report=write_reports(out,source_desc,extracted,images,archives)
-              log("\nAnalysis complete.")
-              log(f"Report: {out/'analysis/ANALYSIS_REPORT.txt'}")
-              log(f"JSON:   {out/'analysis/analysis_report.json'}")
-              log(f"Prep:   {out/'device_tree_prep/EVIDENCE_MANIFEST.txt'}")
-              if any(x.get("format")=="vendor_boot" and x.get("lz4_decompressed") for x in images):
-                  log("Vendor_boot ramdisk was decompressed and CPIO-parsed.")
-              else:
-                  log("No vendor_boot ramdisk was successfully parsed; install/use the lz4 utility for full ramdisk inspection.")
+              # Payload extraction: use payload-dumper-go on every payload.bin discovered.
+              payloads=find_payloads(ext)
+              for p in payloads:
+                  dest=ext/'__payload__'/p.parent.name
+                  log(f'Payload detected: {p.relative_to(ext)}')
+                  r=extract_payload(p,dest); payload_results.append({'path':str(p.relative_to(ext)),**r})
+                  if r.get('ok'): log(f'Payload extracted to {dest}')
+                  else: log('WARN payload extraction failed: '+r.get('error','unknown'))
+              # Process every boot/vendor_boot image now, including payload output.
+              image_results=[]
+              processed=set()
+              for p in list(ext.rglob('*')):
+                  if not p.is_file() or p in processed: continue
+                  m=parse_image(p)
+                  if not m: continue
+                  processed.add(p); item={'path':str(p.relative_to(ext)),**m}
+                  if m['type']=='vendor_boot': item['vendor_boot']=extract_vendor_boot(p,ext/'__vendor_boot__'/p.stem)
+                  image_results.append(item)
+              cats,targets,files=scan(ext)
+              report={'device':DEVICE,'soc':SOC,'generated_utc':datetime.now(timezone.utc).isoformat(),'source':source,'sha256':sha256(archive),'archives':archives,'payloads':payload_results,'images':image_results,'targets':targets,'categories':dict(cats),'file_count':len(files)}
+              ad=out/'analysis'; ad.mkdir(exist_ok=True); prep=out/'device_tree_prep'; prep.mkdir(exist_ok=True)
+              (ad/'analysis_report.json').write_text(json.dumps(report,indent=2))
+              lines=['POCO M7 PRO 5G (BERYL) STOCK ROM EVIDENCE REPORT','='*72,f'Source: {source}',f'SHA256: {report["sha256"]}',f'Files observed: {len(files)}','', 'ANDROID IMAGES','-'*72]
+              lines += [f'  {json.dumps(x,sort_keys=True)}' for x in image_results] or ['  (none)']
+              lines += ['','PAYLOAD EXTRACTION','-'*72] + [f'  {json.dumps(x,sort_keys=True)}' for x in payload_results] or ['  (none)']
+              lines += ['','TARGETED RECOVERY EVIDENCE','-'*72]
+              for k,v in targets.items():
+                  lines.append(k+':'); lines += ['  - '+(json.dumps(x,sort_keys=True) if isinstance(x,dict) else x) for x in v[:200]] or lines.append('  - (none)')
+              lines += ['','CATEGORY COUNTS','-'*72]+[f'  {k}: {v}' for k,v in sorted(cats.items())]
+              (ad/'ANALYSIS_REPORT.txt').write_text('\n'.join(lines)+'\n')
+              (prep/'EVIDENCE_MANIFEST.txt').write_text('\n'.join(files)+'\n')
+              (ad/'DEVICE_TREE_CHECKLIST.txt').write_text('''BERYL STOCK EVIDENCE CHECKLIST\n==============================\n[ ] Confirm vendor_boot v4 header/page size.\n[ ] Confirm stock vendor ramdisk fragments and types.\n[ ] Confirm fstab.mt6855/fstab.emmc/recovery.fstab.\n[ ] Confirm recovery init/ueventd and MTK PLPATH files.\n[ ] Confirm modules.load.recovery and actual .ko files.\n[ ] Confirm stock DTB and DTBO evidence.\n[ ] Confirm Android 14 FBE/inlinecrypt/fsverity entries from stock.\n[ ] Confirm recovery binaries/libraries from actual stock evidence.\n[ ] Do not blindly copy stock binaries into the device tree.\n[ ] Do not enable FOX_VENDOR_BOOT_RECOVERY solely because recovery resources are in vendor_boot.\n''')
+              # Hard failure: this prevents the previous false-success report.
+              if not image_results and not payloads:
+                  raise SystemExit('ERROR: No Android boot/vendor_boot image and no payload.bin were found. The ROM package was not actually unpacked to Android image level.')
+              if not image_results:
+                  raise SystemExit('ERROR: payload.bin was found but no Android images were produced. Check payload-dumper-go output above.')
+              if not any(x.get('type')=='vendor_boot' for x in image_results):
+                  raise SystemExit('ERROR: No vendor_boot image found after archive/payload extraction; refusing to produce a false-success analysis.')
+              if not any(x.get('vendor_boot',{}).get('lz4') for x in image_results if isinstance(x.get('vendor_boot'),dict)):
+                  raise SystemExit('ERROR: vendor_boot was found but its ramdisk was not decompressed/parsed.')
+              log('SUCCESS: vendor_boot and recovery ramdisk evidence extracted.')
               return 0
-          
-          if __name__=="__main__":
-              raise SystemExit(main())
+          if __name__=='__main__': raise SystemExit(main())
           PY_ANALYZER
           python3 -m py_compile rom_analyzer.py
-          echo "Embedded analyzer created successfully."
           sha256sum rom_analyzer.py
 
       - name: Run embedded Beryl stock ROM analyzer
         env:
           ROM_URL: ${{ steps.input.outputs.url }}
+        env:
+          ROM_URL: ${{ steps.input.outputs.url }}
+          PAYLOAD_PARTITIONS: "boot,vendor_boot,dtbo,vendor_dlkm,vbmeta,vbmeta_system,vbmeta_vendor"
         run: |
           set -euo pipefail
           rm -rf "${OUTPUT_DIR}"
