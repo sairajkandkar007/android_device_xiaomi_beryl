@@ -74,68 +74,45 @@ jobs:
             analysis/reports \
             analysis/scripts
 
-      - name: Download exact Xiaomi stock ROM with maximum practical aria2 parallelism
+      - name: Download exact Xiaomi stock ROM with multi-CDN aria2 acceleration
         shell: bash
         run: |
           set -euo pipefail
 
           cd analysis/rom
 
-          echo "ROM:"
-          echo "$ROM_URL"
-          echo
+          ROM_PATH="OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip"
 
-          echo "========== BIGOTA RANGE TEST =========="
-          rm -f .bigota-range-test
+          URL_BIGOTA="https://bigota.d.miui.com/${ROM_PATH}"
+          URL_HUGEOTA="https://hugeota.d.miui.com/${ROM_PATH}"
+          URL_ULTIMATE="https://ultimateota.d.miui.com/${ROM_PATH}"
+          URL_BN="https://bn.d.miui.com/${ROM_PATH}"
 
-          curl -fsSIL             --connect-timeout 15             --max-time 30             "$ROM_URL"             | tee ../reports/BIGOTA_HEADERS.txt || true
+          echo "Downloading from multiple Xiaomi CDN endpoints..."
 
-          echo
-          echo "Testing a 32 MiB HTTP range..."
-          if curl -fsSL               --range 0-33554431               --connect-timeout 15               --max-time 90               -o .bigota-range-test               "$ROM_URL"; then
-            bytes="$(stat -c '%s' .bigota-range-test)"
-            echo "Range test downloaded: $bytes bytes"
-            echo "$bytes" > ../reports/BIGOTA_RANGE_BYTES.txt
-          else
-            echo "Range test failed; continuing with aria2."
-          fi
-          rm -f .bigota-range-test
-
-          echo "======================================"
-          echo
-
-          # Aggressive but practical settings for Xiaomi Bigota.
-          # 16 parallel range connections are retained because the current
-          # runner/CDN path is already showing throttling at this level.
           aria2c \
             --no-conf=true \
-            --dry-run=false \
             --continue=true \
             --always-resume=true \
-            --allow-overwrite=false \
+            --allow-overwrite=true \
             --auto-file-renaming=false \
             --file-allocation=none \
-            --check-integrity=true \
-            --max-tries=0 \
-            --retry-wait=1 \
-            --connect-timeout=15 \
-            --timeout=30 \
-            --lowest-speed-limit=1K \
-            --max-overall-download-limit=0 \
-            --max-download-limit=0 \
+            --max-tries=10 \
+            --retry-wait=2 \
+            --connect-timeout=10 \
+            --timeout=20 \
             --split=16 \
-            --max-connection-per-server=16 \
-            --min-split-size=1M \
-            --piece-length=1M \
-            --stream-piece-selector=inorder \
+            --max-connection-per-server=4 \
+            --min-split-size=10M \
+            --piece-length=10M \
             --enable-http-keep-alive=true \
-            --reuse-uri=false \
             --http-no-cache=true \
-            --http-accept-gzip=false \
             --summary-interval=5 \
-            --download-result=hide \
             --out="$ROM_NAME" \
-            "$ROM_URL"
+            "$URL_BIGOTA" \
+            "$URL_HUGEOTA" \
+            "$URL_ULTIMATE" \
+            "$URL_BN"
 
           test -s "$ROM_NAME"
           echo "ROM size:"
@@ -207,7 +184,6 @@ jobs:
 
           mkdir -p analysis/partitions
 
-          # Direct images from the ROM.
           find analysis/rom_extract -type f \
             \( -iname '*.img' -o -iname '*.bin' \) \
             -print0 \
@@ -219,7 +195,6 @@ jobs:
                 cp -f "$f" "analysis/partitions/$base" || true
               done
 
-          # Images extracted from payload.bin.
           if [ -d analysis/payload/extracted ]; then
             find analysis/payload/extracted -type f \
               \( -iname '*.img' -o -iname '*.bin' \) \
@@ -243,8 +218,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The full ROM is authoritative. These are only used if the ROM
-          # archive does not contain one of the low-level images.
           API="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/Berylstock"
 
           curl -fsSL \
@@ -327,13 +300,9 @@ jobs:
               out={"file":path,"magic":magic,"size":os.path.getsize(path)}
 
               if magic == "ANDROID!":
-                  # boot header v3/v4 common fields
                   out["kernel_size"]=u32(data,8)
                   out["ramdisk_size"]=u32(data,12)
                   out["os_version"]=u32(data,40)
-                  out["header_version"]=u32(data,40+4) if len(data)>=48 else None
-
-                  # Correct v3/v4 header_version offset is 40.
                   out["header_version"]=u32(data,40)
 
                   if out["header_version"] >= 3:
@@ -405,7 +374,6 @@ jobs:
               k=u32(d,8)
               r=u32(d,12)
 
-              # v3/v4: header is one page, kernel follows; ramdisk follows kernel.
               off=PAGE
               kernel_off=off
               ramdisk_off=align(kernel_off+k)
@@ -431,10 +399,7 @@ jobs:
               open(os.path.join(out,"vendor_ramdisk.lz4"),"wb").write(
                   d[ramdisk_off:ramdisk_off+ramdisk_size]
               )
-              # v4 stores DTB immediately after aligned vendor ramdisk.
               if dtb_off < len(d):
-                  # DTB size is obtained from v4 header/table area when possible;
-                  # keep remaining bytes as a raw candidate for later analysis.
                   open(os.path.join(out,"vendor_boot_after_ramdisk.bin"),"wb").write(
                       d[dtb_off:]
                   )
@@ -470,7 +435,6 @@ jobs:
 
               out="${f%.lz4}.cpio"
 
-              # Android ramdisks use legacy LZ4. Try the system decoder first.
               if lz4 -d -f "$f" "$out" >/dev/null 2>&1; then
                 :
               else
@@ -558,7 +522,6 @@ jobs:
           echo "===== $name =====" >> analysis/reports/FILESYSTEM_ANALYSIS.txt
           echo "$type" >> analysis/reports/FILESYSTEM_ANALYSIS.txt
 
-          # Android sparse image.
           if echo "$type" | grep -qi 'Android sparse'; then
             raw="$out/${name}.raw.img"
             if simg2img "$img" "$raw"; then
@@ -578,13 +541,10 @@ jobs:
                 || true
             fi
           elif echo "$type" | grep -qi 'ext4'; then
-            # debugfs works without mounting and therefore without privileged mounts.
             debugfs -R "rdump / $out" "$img" \
               >> analysis/reports/FILESYSTEM_ANALYSIS.txt 2>&1 \
               || true
           elif echo "$type" | grep -qi 'F2FS'; then
-            # Keep metadata and strings for F2FS; recovery-critical files are
-            # normally obtained from the extracted vendor/system partitions.
             strings -a "$img" \
               | grep -Ei 'fstab|init\.|recovery|beryl|mt6855|encrypt|avb' \
               | head -n 1000 \
