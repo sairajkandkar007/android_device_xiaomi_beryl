@@ -5,11 +5,11 @@ on:
     inputs:
       rom_url:
         description: "Direct stock ROM URL (Xiaomi recovery ROM ZIP or compatible archive)"
-        required: true
+        required: false
         type: string
       rom_version:
         description: "ROM version/build label"
-        required: true
+        required: false
         default: "unknown"
         type: string
       commit_reports:
@@ -59,8 +59,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y lz4 xz-utils unzip p7zip-full
+          sudo apt-get install -y lz4 liblz4-dev xz-utils liblzma-dev zlib1g-dev unzip p7zip-full
           echo "Installing payload-dumper-go..."
+          # payload-dumper-go has a Go/XZ dependency that needs lzma.h.
+          # liblzma-dev above provides the required development header.
           go install github.com/ssut/payload-dumper-go@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           export PATH="$(go env GOPATH)/bin:$PATH"
@@ -348,6 +350,8 @@ jobs:
           sha256sum rom_analyzer.py
 
       - name: Run embedded Beryl stock ROM analyzer
+        env:
+          ROM_URL: ${{ steps.input.outputs.url }}
         env:
           ROM_URL: ${{ steps.input.outputs.url }}
           PAYLOAD_PARTITIONS: "boot,vendor_boot,dtbo,vendor_dlkm,vbmeta,vbmeta_system,vbmeta_vendor"
