@@ -7,7 +7,8 @@ permissions:
   contents: read
 
 env:
-  ROM_URL: "https://bigota.d.miui.com/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip"
+  ROM_URL: "https://sourceforge.net/projects/xiaomi-firmware-updater/files/HyperOS/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip/download"
+  FALLBACK_URL: "https://bigota.d.miui.com/OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip"
   ROM_NAME: "miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip"
   DEVICE: "beryl"
   DEVICE_PATH: "device/xiaomi/beryl"
@@ -74,45 +75,50 @@ jobs:
             analysis/reports \
             analysis/scripts
 
-      - name: Download exact Xiaomi stock ROM with multi-CDN aria2 acceleration
+      - name: Download stock ROM via unthrottled SourceForge mirror
         shell: bash
         run: |
           set -euo pipefail
 
           cd analysis/rom
 
-          ROM_PATH="OS1.0.4.0.UOQINXM/miui_BERYLINGlobal_OS1.0.4.0.UOQINXM_b51bc03ea2_14.0.zip"
+          echo "Primary mirror URL: $ROM_URL"
+          echo "Fallback URL: $FALLBACK_URL"
 
-          URL_BIGOTA="https://bigota.d.miui.com/${ROM_PATH}"
-          URL_HUGEOTA="https://hugeota.d.miui.com/${ROM_PATH}"
-          URL_ULTIMATE="https://ultimateota.d.miui.com/${ROM_PATH}"
-          URL_BN="https://bn.d.miui.com/${ROM_PATH}"
-
-          echo "Downloading from multiple Xiaomi CDN endpoints..."
-
-          aria2c \
+          # Attempt fast download from SourceForge first (follows redirects, 16 connections)
+          if ! aria2c \
             --no-conf=true \
             --continue=true \
             --always-resume=true \
             --allow-overwrite=true \
             --auto-file-renaming=false \
             --file-allocation=none \
-            --max-tries=10 \
+            --max-tries=5 \
             --retry-wait=2 \
-            --connect-timeout=10 \
-            --timeout=20 \
+            --connect-timeout=15 \
+            --timeout=30 \
             --split=16 \
-            --max-connection-per-server=4 \
+            --max-connection-per-server=8 \
             --min-split-size=10M \
-            --piece-length=10M \
-            --enable-http-keep-alive=true \
-            --http-no-cache=true \
             --summary-interval=5 \
             --out="$ROM_NAME" \
-            "$URL_BIGOTA" \
-            "$URL_HUGEOTA" \
-            "$URL_ULTIMATE" \
-            "$URL_BN"
+            "$ROM_URL"; then
+              echo "SourceForge download failed or incomplete. Falling back to BigOTA CDN..."
+              aria2c \
+                --no-conf=true \
+                --continue=true \
+                --always-resume=true \
+                --allow-overwrite=true \
+                --file-allocation=none \
+                --max-tries=10 \
+                --retry-wait=2 \
+                --split=8 \
+                --max-connection-per-server=4 \
+                --min-split-size=10M \
+                --summary-interval=5 \
+                --out="$ROM_NAME" \
+                "$FALLBACK_URL"
+          fi
 
           test -s "$ROM_NAME"
           echo "ROM size:"
