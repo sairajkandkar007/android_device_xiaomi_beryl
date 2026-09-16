@@ -1,0 +1,18 @@
+beryl stock image metadata
+
+boot.img:
+  size: 134217728
+  header: 4
+  page size: 4096
+
+vendor_boot.img:
+  size: 67108864
+  header: 4
+
+Device: beryl
+Platform: mt6855
+Architecture: arm64
+A/B: true
+Dynamic partitions: true
+GKI: true
+AVB: true

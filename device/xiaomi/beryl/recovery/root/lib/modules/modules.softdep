@@ -1,0 +1,3 @@
+# Soft dependencies extracted from modules themselves.
+softdep ufs_mediatek_mod pre: governor_simpleondemand
+softdep mt6855_dcm pre:mtk_dcm.ko

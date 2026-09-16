@@ -1,0 +1,15 @@
+beryl boot control discovery.
+
+Device: POCO M7 Pro 5G
+Codename: beryl
+Platform: mt6855
+Architecture: ARM64
+A/B: true
+Dynamic partitions: true
+GKI: true
+Boot header: v4
+Vendor boot header: v4
+
+Do not fabricate a boot-control implementation.
+The final implementation must be derived from the stock
+boot-control HAL or appropriate ROM source.

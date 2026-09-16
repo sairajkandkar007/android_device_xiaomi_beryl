@@ -1,0 +1,7 @@
+Stock beryl vendor_boot recovery requirement.
+
+init.recovery.mt6855.rc executes:
+/system/bin/mtk_plpath_utils
+
+The proprietary binary is not fabricated here.
+It must be supplied during final proprietary blob integration.
