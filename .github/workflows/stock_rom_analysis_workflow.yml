@@ -352,8 +352,6 @@ jobs:
       - name: Run embedded Beryl stock ROM analyzer
         env:
           ROM_URL: ${{ steps.input.outputs.url }}
-        env:
-          ROM_URL: ${{ steps.input.outputs.url }}
           PAYLOAD_PARTITIONS: "boot,vendor_boot,dtbo,vendor_dlkm,vbmeta,vbmeta_system,vbmeta_vendor"
         run: |
           set -euo pipefail
