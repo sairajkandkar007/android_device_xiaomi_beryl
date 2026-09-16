@@ -103,8 +103,8 @@ jobs:
             --lowest-speed-limit=0 \
             --max-overall-download-limit=0 \
             --max-download-limit=0 \
-            --split=32 \
-            --max-connection-per-server=32 \
+            --split=16 \
+            --max-connection-per-server=16 \
             --min-split-size=4M \
             --piece-length=1M \
             --stream-piece-selector=geom \
