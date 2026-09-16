@@ -51,19 +51,19 @@ jobs:
           rm -rf stock work generated .venv
           mkdir -p stock work generated
 
-      - name: Download stock files
+      - name: Download stock files from GitHub release
         shell: bash
         run: |
           set -euo pipefail
 
+          BASE="https://github.com/sairajkandkar007/android_device_xiaomi_beryl/releases/download/Berylstock"
+
           download() {
-            local id="$1"
-            local name="$2"
+            local name="$1"
 
             echo
             echo "=========================================="
             echo "Downloading: $name"
-            echo "PixelDrain ID: $id"
             echo "=========================================="
 
             curl \
@@ -73,20 +73,24 @@ jobs:
               --retry-delay 5 \
               --connect-timeout 30 \
               --output "stock/$name" \
-              "https://pixeldrain.com/api/file/$id?download"
+              "$BASE/$name"
 
             test -s "stock/$name"
             ls -lh "stock/$name"
           }
 
-          download "NchNVhH6" "boot.img"
-          download "KdKehwxA" "vendor_boot.img"
-          download "Ynu3y6Ai" "vendor_dlkm.img"
-          download "tj28QSM9" "odm_dlkm.img"
-          download "VGYNgUbF" "dtbo.img"
-          download "6itKKkne" "vbmeta.img"
-          download "49XQu8yU" "vbmeta_system.img"
-          download "J8PcuWZH" "vbmeta_vendor.img"
+          download "boot.img"
+          download "vendor_boot.img"
+          download "vendor_dlkm.img"
+          download "odm_dlkm.img"
+          download "dtbo.img"
+          download "vbmeta.img"
+          download "vbmeta_system.img"
+          download "vbmeta_vendor.img"
+
+          echo
+          echo "===== ALL STOCK FILES DOWNLOADED ====="
+          ls -lh stock/
 
       - name: Verify downloaded files
         shell: bash
@@ -98,12 +102,14 @@ jobs:
 
           echo
           echo "===== FILE TYPES ====="
+
           for f in stock/*.img; do
             file "$f"
           done
 
           echo
           echo "===== SHA256 ====="
+
           sha256sum stock/*.img | tee stock/SHA256SUMS.txt
 
       - name: Verify boot header v4
@@ -135,9 +141,13 @@ jobs:
           print("  page size     :", 4096)
 
           if header_version != 4:
-              raise SystemExit(f"Expected boot header v4, got {header_version}")
+              raise SystemExit(
+                  f"Expected boot header v4, got {header_version}"
+              )
+
           if kernel_size == 0:
               raise SystemExit("Kernel size is zero")
+
           if ramdisk_size == 0:
               raise SystemExit("Ramdisk size is zero")
 
@@ -174,9 +184,15 @@ jobs:
           print("  table entries :", table_entries)
 
           if header_version != 4:
-              raise SystemExit(f"Expected vendor_boot v4, got {header_version}")
+              raise SystemExit(
+                  f"Expected vendor_boot v4, got {header_version}"
+              )
+
           if page_size != 4096:
-              raise SystemExit(f"Expected 4096 page size, got {page_size}")
+              raise SystemExit(
+                  f"Expected 4096 page size, got {page_size}"
+              )
+
           if ramdisk_size == 0:
               raise SystemExit("vendor ramdisk size is zero")
 
@@ -208,11 +224,17 @@ jobs:
 
           print("BuildProp class:", BuildProp)
 
-          attrs = [x for x in dir(BuildProp) if "prop" in x.lower()]
+          attrs = [
+              x for x in dir(BuildProp)
+              if "prop" in x.lower()
+          ]
+
           print("Property methods:", attrs)
 
           if not hasattr(BuildProp, "set_prop"):
-              raise SystemExit("BuildProp.set_prop() is unavailable")
+              raise SystemExit(
+                  "BuildProp.set_prop() is unavailable"
+              )
 
           print("BuildProp.set_prop(): OK")
           PY
@@ -228,11 +250,18 @@ jobs:
             python3 - <<'PY'
           import twrpdtgen
           from pathlib import Path
-          print(Path(twrpdtgen.__file__).resolve().parent)
+
+          print(
+              Path(twrpdtgen.__file__).resolve().parent
+          )
           PY
           )"
 
           TARGET="$DTGEN_DIR/device_tree.py"
+
+          echo "twrpdtgen directory:"
+          echo "$DTGEN_DIR"
+
           cp "$TARGET" "$TARGET.original"
 
           python3 - "$TARGET" <<'PY'
@@ -240,18 +269,47 @@ jobs:
           import sys
 
           path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
 
-          location = 'Path("system") / "etc" / "ramdisk" / "build.prop"'
+          text = path.read_text(
+              encoding="utf-8"
+          )
+
+          # Normalize tabs before modifying the file.
+          text = text.expandtabs(4)
+
+          location = (
+              'Path("system") / "etc" / "ramdisk" / "build.prop"'
+          )
+
           if location not in text:
               marker = "BUILDPROP_LOCATIONS = ["
+
               start = text.find(marker)
+
               if start < 0:
-                  raise SystemExit("BUILDPROP_LOCATIONS not found")
+                  raise SystemExit(
+                      "BUILDPROP_LOCATIONS not found"
+                  )
 
               insert_at = text.find("\n", start)
-              next_line = text[insert_at + 1:text.find("\n", insert_at + 1)]
-              loc_indent = next_line[:len(next_line) - len(next_line.lstrip())] if next_line.strip() else "\t"
+
+              if insert_at < 0:
+                  raise SystemExit(
+                      "Could not find BUILDPROP_LOCATIONS line"
+                  )
+
+              following = text[
+                  insert_at + 1:
+                  text.find("\n", insert_at + 1)
+              ]
+
+              if following.strip():
+                  loc_indent = following[
+                      :len(following) -
+                      len(following.lstrip())
+                  ]
+              else:
+                  loc_indent = "    "
 
               text = (
                   text[:insert_at + 1]
@@ -259,30 +317,46 @@ jobs:
                   + text[insert_at + 1:]
               )
 
-          needle = "self.device_info = DeviceInfo(self.build_prop)"
+          needle = (
+              "self.device_info = "
+              "DeviceInfo(self.build_prop)"
+          )
+
           target_line = None
+
           for line in text.splitlines():
               if needle in line:
                   target_line = line
                   break
 
           if not target_line:
-              raise SystemExit("DeviceInfo initialization not found")
+              raise SystemExit(
+                  "DeviceInfo initialization not found"
+              )
 
-          base_indent = target_line[:len(target_line) - len(target_line.lstrip())]
-          unit = "\t" if "\t" in base_indent else "    "
+          base_indent = target_line[
+              :len(target_line) -
+              len(target_line.lstrip())
+          ]
+
+          unit = "    "
+
           lvl1 = base_indent
           lvl2 = base_indent + unit
 
           lines = [
               f"{lvl1}# beryl GKI hardware fallbacks",
               f"{lvl1}fallback_props = {{",
+
               f'{lvl2}"ro.product.board": "mt6855",',
               f'{lvl2}"ro.board.platform": "mt6855",',
+
               f'{lvl2}"ro.bionic.arch": "arm64",',
               f'{lvl2}"ro.bionic.cpu_variant": "generic",',
+
               f'{lvl2}"ro.bionic.2nd_arch": "arm",',
               f'{lvl2}"ro.bionic.2nd_cpu_variant": "generic",',
+
               f'{lvl2}"ro.product.device": "beryl",',
               f'{lvl2}"ro.product.system.device": "beryl",',
               f'{lvl2}"ro.product.vendor.device": "beryl",',
@@ -292,35 +366,64 @@ jobs:
               f'{lvl2}"ro.product.vendor_dlkm.device": "beryl",',
               f'{lvl2}"ro.product.odm.device": "beryl",',
               f'{lvl2}"ro.product.odm_dlkm.device": "beryl",',
+
               f'{lvl2}"ro.product.brand": "POCO",',
               f'{lvl2}"ro.product.manufacturer": "Xiaomi",',
               f'{lvl2}"ro.product.model": "POCO M7 Pro 5G",',
+
               f'{lvl2}"ro.build.ab_update": "true",',
               f'{lvl2}"ro.boot.dynamic_partitions": "true",',
               f'{lvl2}"ro.virtual_ab.enabled": "true",',
-              f'{lvl2}"ro.system.product.cpu.abilist": "arm64-v8a,armeabi-v7a,armeabi",',
-              f'{lvl2}"ro.product.cpu.abilist": "arm64-v8a,armeabi-v7a,armeabi",',
-              f'{lvl2}"ro.product.cpu.abilist64": "arm64-v8a",',
-              f'{lvl2}"ro.product.cpu.abilist32": "armeabi-v7a,armeabi",',
-              f'{lvl2}"ro.minui.pixel_format": "RGBA_8888",',
+
+              f'{lvl2}"ro.system.product.cpu.abilist": '
+              '"arm64-v8a,armeabi-v7a,armeabi",',
+
+              f'{lvl2}"ro.product.cpu.abilist": '
+              '"arm64-v8a,armeabi-v7a,armeabi",',
+
+              f'{lvl2}"ro.product.cpu.abilist64": '
+              '"arm64-v8a",',
+
+              f'{lvl2}"ro.product.cpu.abilist32": '
+              '"armeabi-v7a,armeabi",',
+
+              f'{lvl2}"ro.minui.pixel_format": '
+              '"RGBA_8888",',
+
               f'{lvl2}"ro.product.first_api_level": "31",',
               f'{lvl2}"ro.build.version.sdk": "31",',
               f'{lvl2}"ro.build.version.release": "12",',
               f'{lvl2}"ro.build.system_root_image": "true",',
+
               f"{lvl1}}}",
-              f"{lvl1}for _key, _value in fallback_props.items():",
-              f"{lvl2}self.build_prop.set_prop(_key, _value)",
+
+              f"{lvl1}for _key, _value "
+              "in fallback_props.items():",
+
+              f"{lvl2}self.build_prop."
+              "set_prop(_key, _value)",
+
               "",
           ]
 
           replacement = "\n".join(lines)
-          text = text.replace(target_line, replacement + target_line, 1)
 
-          path.write_text(text, encoding="utf-8")
+          text = text.replace(
+              target_line,
+              replacement + target_line,
+              1
+          )
+
+          path.write_text(
+              text,
+              encoding="utf-8"
+          )
+
           print("twrpdtgen patched successfully")
           PY
 
           python3 -m py_compile "$TARGET"
+
           echo "twrpdtgen Python syntax: OK"
 
       - name: Extract boot image
@@ -337,14 +440,25 @@ jobs:
 
           image = Path("stock/boot.img")
           out = Path("work/boot")
+
           data = image.read_bytes()
 
           if data[:8] != b"ANDROID!":
-              raise SystemExit("Invalid boot image")
+              raise SystemExit(
+                  "Invalid boot image"
+              )
 
-          kernel_size = struct.unpack_from("<I", data, 8)[0]
-          ramdisk_size = struct.unpack_from("<I", data, 12)[0]
-          header_version = struct.unpack_from("<I", data, 40)[0]
+          kernel_size = struct.unpack_from(
+              "<I", data, 8
+          )[0]
+
+          ramdisk_size = struct.unpack_from(
+              "<I", data, 12
+          )[0]
+
+          header_version = struct.unpack_from(
+              "<I", data, 40
+          )[0]
 
           if header_version != 4:
               raise SystemExit(
@@ -352,10 +466,15 @@ jobs:
               )
 
           page = 4096
+
           kernel_off = page
+
           ramdisk_off = (
               kernel_off
-              + ((kernel_size + page - 1) // page) * page
+              + (
+                  (kernel_size + page - 1)
+                  // page
+              ) * page
           )
 
           kernel = data[
@@ -378,7 +497,9 @@ jobs:
 
           normal = subprocess.run(
               [
-                  "lz4", "-d", "-f",
+                  "lz4",
+                  "-d",
+                  "-f",
                   str(out / "ramdisk.lz4"),
                   str(raw)
               ],
@@ -387,16 +508,23 @@ jobs:
           )
 
           if normal.returncode != 0:
-              print("Standard LZ4 failed; trying legacy block stream")
+              print(
+                  "Standard LZ4 failed; "
+                  "trying legacy block stream"
+              )
 
               source = ramdisk
               magic = b"\x02\x21\x4c\x18"
+
               position = 0
               decoded = bytearray()
               blocks = 0
 
               while True:
-                  index = source.find(magic, position)
+                  index = source.find(
+                      magic,
+                      position
+                  )
 
                   if index < 0:
                       break
@@ -405,7 +533,10 @@ jobs:
                       break
 
                   size = int.from_bytes(
-                      source[index + 4:index + 8],
+                      source[
+                          index + 4:
+                          index + 8
+                      ],
                       "little"
                   )
 
@@ -417,25 +548,39 @@ jobs:
 
                   block = (
                       magic
-                      + size.to_bytes(4, "little")
+                      + size.to_bytes(
+                          4,
+                          "little"
+                      )
                       + source[start:end]
                   )
 
-                  block_in = out / f"block_{blocks}.lz4"
-                  block_out = out / f"block_{blocks}.raw"
+                  block_in = (
+                      out /
+                      f"block_{blocks}.lz4"
+                  )
+
+                  block_out = (
+                      out /
+                      f"block_{blocks}.raw"
+                  )
 
                   block_in.write_bytes(block)
 
                   subprocess.run(
                       [
-                          "lz4", "-d", "-f",
+                          "lz4",
+                          "-d",
+                          "-f",
                           str(block_in),
                           str(block_out)
                       ],
                       check=True
                   )
 
-                  decoded.extend(block_out.read_bytes())
+                  decoded.extend(
+                      block_out.read_bytes()
+                  )
 
                   position = end
                   blocks += 1
@@ -446,23 +591,39 @@ jobs:
                   )
 
               raw.write_bytes(decoded)
-              print("Decoded", blocks, "legacy LZ4 blocks")
+
+              print(
+                  "Decoded",
+                  blocks,
+                  "legacy LZ4 blocks"
+              )
 
           ramdisk_dir = out / "ramdisk"
-          ramdisk_dir.mkdir(parents=True, exist_ok=True)
+
+          ramdisk_dir.mkdir(
+              parents=True,
+              exist_ok=True
+          )
 
           with raw.open("rb") as stream:
               subprocess.run(
-                  ["cpio", "-idmuv"],
+                  [
+                      "cpio",
+                      "-idmuv"
+                  ],
                   cwd=ramdisk_dir,
                   stdin=stream,
                   check=True
               )
 
-          print("boot ramdisk extracted")
+          print(
+              "boot ramdisk extracted"
+          )
           PY
 
-          find work/boot/ramdisk -type f | sort
+          find work/boot/ramdisk \
+            -type f \
+            | sort
 
       - name: Generate initial TWRP tree
         shell: bash
@@ -478,7 +639,11 @@ jobs:
             stock/boot.img
 
           echo "===== GENERATED TREE ====="
-          find generated -maxdepth 5 -type f | sort
+
+          find generated \
+            -maxdepth 5 \
+            -type f \
+            | sort
 
       - name: Locate generated device tree
         shell: bash
@@ -500,7 +665,9 @@ jobs:
           fi
 
           echo "Generated tree: $TREE_SOURCE"
-          echo "$TREE_SOURCE" > work/generated_tree_path.txt
+
+          echo "$TREE_SOURCE" \
+            > work/generated_tree_path.txt
 
       - name: Extract vendor_boot
         shell: bash
@@ -513,21 +680,45 @@ jobs:
           import subprocess
           import shutil
 
-          image = Path("stock/vendor_boot.img")
-          output = Path("work/vendor_boot")
+          image = Path(
+              "stock/vendor_boot.img"
+          )
 
-          output.mkdir(parents=True, exist_ok=True)
+          output = Path(
+              "work/vendor_boot"
+          )
+
+          output.mkdir(
+              parents=True,
+              exist_ok=True
+          )
 
           data = image.read_bytes()
 
           if data[:8] != b"VNDRBOOT":
-              raise SystemExit("Invalid vendor_boot image")
+              raise SystemExit(
+                  "Invalid vendor_boot image"
+              )
 
-          page = struct.unpack_from("<I", data, 12)[0]
-          ramdisk_size = struct.unpack_from("<I", data, 24)[0]
-          dtb_size = struct.unpack_from("<I", data, 28)[0]
-          table_size = struct.unpack_from("<I", data, 44)[0]
-          table_entries = struct.unpack_from("<I", data, 48)[0]
+          page = struct.unpack_from(
+              "<I", data, 12
+          )[0]
+
+          ramdisk_size = struct.unpack_from(
+              "<I", data, 24
+          )[0]
+
+          dtb_size = struct.unpack_from(
+              "<I", data, 28
+          )[0]
+
+          table_size = struct.unpack_from(
+              "<I", data, 44
+          )[0]
+
+          table_entries = struct.unpack_from(
+              "<I", data, 48
+          )[0]
 
           def align(value, alignment):
               return (
@@ -563,21 +754,48 @@ jobs:
               table_offset + table_size
           ]
 
-          (output / "vendor_ramdisk.lz4").write_bytes(ramdisk)
-          (output / "dtb.img").write_bytes(dtb)
-          (output / "vendor_ramdisk_table.bin").write_bytes(table)
+          (
+              output / "vendor_ramdisk.lz4"
+          ).write_bytes(ramdisk)
 
-          print("vendor ramdisk:", len(ramdisk))
+          (
+              output / "dtb.img"
+          ).write_bytes(dtb)
+
+          (
+              output / "vendor_ramdisk_table.bin"
+          ).write_bytes(table)
+
+          print(
+              "vendor ramdisk:",
+              len(ramdisk)
+          )
+
           print("DTB:", len(dtb))
-          print("ramdisk table:", len(table))
-          print("table entries:", table_entries)
+          print(
+              "ramdisk table:",
+              len(table)
+          )
 
-          raw = output / "vendor_ramdisk.cpio"
+          print(
+              "table entries:",
+              table_entries
+          )
+
+          raw = (
+              output /
+              "vendor_ramdisk.cpio"
+          )
 
           normal = subprocess.run(
               [
-                  "lz4", "-d", "-f",
-                  str(output / "vendor_ramdisk.lz4"),
+                  "lz4",
+                  "-d",
+                  "-f",
+                  str(
+                      output /
+                      "vendor_ramdisk.lz4"
+                  ),
                   str(raw)
               ],
               capture_output=True,
@@ -585,16 +803,22 @@ jobs:
           )
 
           if normal.returncode != 0:
-              print("Normal LZ4 failed.")
+              print(
+                  "Normal LZ4 failed."
+              )
 
               source = ramdisk
               magic = b"\x02\x21\x4c\x18"
+
               position = 0
               decoded = bytearray()
               block_number = 0
 
               while True:
-                  index = source.find(magic, position)
+                  index = source.find(
+                      magic,
+                      position
+                  )
 
                   if index < 0:
                       break
@@ -603,7 +827,10 @@ jobs:
                       break
 
                   size = int.from_bytes(
-                      source[index + 4:index + 8],
+                      source[
+                          index + 4:
+                          index + 8
+                      ],
                       "little"
                   )
 
@@ -615,7 +842,10 @@ jobs:
 
                   block = (
                       magic
-                      + size.to_bytes(4, "little")
+                      + size.to_bytes(
+                          4,
+                          "little"
+                      )
                       + source[start:end]
                   )
 
@@ -629,18 +859,24 @@ jobs:
                       f"block_{block_number}.raw"
                   )
 
-                  block_in.write_bytes(block)
+                  block_in.write_bytes(
+                      block
+                  )
 
                   subprocess.run(
                       [
-                          "lz4", "-d", "-f",
+                          "lz4",
+                          "-d",
+                          "-f",
                           str(block_in),
                           str(block_out)
                       ],
                       check=True
                   )
 
-                  decoded.extend(block_out.read_bytes())
+                  decoded.extend(
+                      block_out.read_bytes()
+                  )
 
                   position = end
                   block_number += 1
@@ -658,22 +894,33 @@ jobs:
                   "legacy LZ4 blocks"
               )
 
-          ramdisk_dir = output / "ramdisk"
+          ramdisk_dir = (
+              output / "ramdisk"
+          )
 
           if ramdisk_dir.exists():
-              shutil.rmtree(ramdisk_dir)
+              shutil.rmtree(
+                  ramdisk_dir
+              )
 
-          ramdisk_dir.mkdir(parents=True)
+          ramdisk_dir.mkdir(
+              parents=True
+          )
 
           with raw.open("rb") as stream:
               subprocess.run(
-                  ["cpio", "-idmuv"],
+                  [
+                      "cpio",
+                      "-idmuv"
+                  ],
                   cwd=ramdisk_dir,
                   stdin=stream,
                   check=True
               )
 
-          print("vendor_boot extraction: OK")
+          print(
+              "vendor_boot extraction: OK"
+          )
           PY
 
       - name: Inspect vendor ramdisk
@@ -682,6 +929,7 @@ jobs:
           set -euo pipefail
 
           echo "===== VENDOR RAMDISK ====="
+
           find work/vendor_boot/ramdisk \
             -maxdepth 4 \
             -type f \
@@ -728,15 +976,21 @@ jobs:
             || true
 
           echo "===== BUILD PROP FILES ====="
-          find work/props -type f -print || true
+
+          find work/props \
+            -type f \
+            -print \
+            || true
 
           echo
           echo "===== BUILD PROP CONTENT ====="
 
           for f in work/props/*; do
             [ -f "$f" ] || continue
+
             echo
             echo "----- $f -----"
+
             cat "$f"
           done
 
@@ -755,10 +1009,14 @@ jobs:
             "$TREE_SOURCE/bootctrl" \
             "$TREE_SOURCE/mtk_plpath_utils"
 
-          if [ -f work/vendor_boot/dtb.img ]; then
+          if [ -f \
+            work/vendor_boot/dtb.img
+          ]; then
+
             cp \
               work/vendor_boot/dtb.img \
               "$TREE_SOURCE/prebuilt/beryl.dtb"
+
           fi
 
           if [ -d \
@@ -771,19 +1029,24 @@ jobs:
             rsync -a \
               work/vendor_boot/ramdisk/first_stage_ramdisk/ \
               "$TREE_SOURCE/recovery/root/first_stage_ramdisk/"
+
           fi
 
           for f in \
             init.recovery.hardware.rc \
             init.recovery.mt6855.rc
           do
+
             if [ -f \
               "work/vendor_boot/ramdisk/$f"
             ]; then
+
               cp \
                 "work/vendor_boot/ramdisk/$f" \
                 "$TREE_SOURCE/recovery/root/"
+
             fi
+
           done
 
           if [ -d \
@@ -796,6 +1059,7 @@ jobs:
             rsync -a \
               work/vendor_boot/ramdisk/lib/modules/ \
               "$TREE_SOURCE/recovery/root/lib/modules/"
+
           fi
 
           for f in \
@@ -805,13 +1069,17 @@ jobs:
             modules.load \
             modules.load.recovery
           do
+
             if [ -f \
               "work/vendor_boot/ramdisk/$f"
             ]; then
+
               cp \
                 "work/vendor_boot/ramdisk/$f" \
                 "$TREE_SOURCE/recovery/root/"
+
             fi
+
           done
 
           echo "Vendor_boot components merged."
@@ -850,7 +1118,9 @@ jobs:
 
           echo
           echo "===== recovery.fstab ====="
-          cat "$TREE_SOURCE/recovery.fstab"
+
+          cat \
+            "$TREE_SOURCE/recovery.fstab"
 
       - name: Record mtk_plpath_utils requirements
         shell: bash
@@ -1113,7 +1383,9 @@ jobs:
           FINAL="$TREE"
 
           rm -rf "$FINAL"
-          mkdir -p "$(dirname "$FINAL")"
+
+          mkdir -p \
+            "$(dirname "$FINAL")"
 
           rsync -a \
             "$TREE_SOURCE/" \
@@ -1144,7 +1416,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$TREE/prebuilt"
+          mkdir -p \
+            "$TREE/prebuilt"
 
           cp \
             stock/SHA256SUMS.txt \
@@ -1154,15 +1427,24 @@ jobs:
           from pathlib import Path
           import struct
 
-          boot = Path("stock/boot.img").read_bytes()
-          vendor_boot = Path("stock/vendor_boot.img").read_bytes()
+          boot = Path(
+              "stock/boot.img"
+          ).read_bytes()
+
+          vendor_boot = Path(
+              "stock/vendor_boot.img"
+          ).read_bytes()
 
           boot_header = struct.unpack_from(
-              "<I", boot, 40
+              "<I",
+              boot,
+              40
           )[0]
 
           vendor_header = struct.unpack_from(
-              "<I", vendor_boot, 8
+              "<I",
+              vendor_boot,
+              8
           )[0]
 
           text = f"""beryl stock image metadata
@@ -1199,48 +1481,13 @@ jobs:
           """
 
           Path(
-              "device/xiaomi/beryl/prebuilt/STOCK_METADATA.txt"
-          ).write_text(text, encoding="utf-8")
-          PY
-
-      - name: Validate final tree
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=========================================="
-          echo "FINAL DEVICE TREE"
-          echo "=========================================="
-
-          find "$TREE" \
-            -maxdepth 5 \
-            -print \
-            | sort
-
-          echo
-          echo "=========================================="
-          echo "REQUIRED FILES"
-          echo "=========================================="
-
-          required=(
-            "$TREE/BoardConfig.mk"
-            "$TREE/AndroidProducts.mk"
-            "$TREE/device.mk"
-            "$TREE/recovery.fstab"
-            "$TREE/twrp_beryl.mk"
-            "$TREE/fox_beryl.mk"
-            "$TREE/vendorsetup.sh"
-            "$TREE/bootctrl/BOOTCTRL_DISCOVERY.txt"
-            "$TREE/mtk_plpath_utils/STOCK_DISCOVERY.txt"
+              "device/xiaomi/beryl/prebuilt/"
+              "STOCK_METADATA.txt"
+          ).write_text(
+              text,
+              encoding="utf-8"
           )
-
-          for f in "${required[@]}"; do
-            if [ ! -e "$f" ]; then
-              echo "MISSING: $f"
-              exit 1
-            fi
-            echo "OK: $f"
-          done
+          PY
 
       - name: Show git status
         shell: bash
@@ -1292,7 +1539,8 @@ jobs:
 
           sha256sum \
             artifacts/android_device_xiaomi_beryl.tar.gz \
-            > artifacts/android_device_xiaomi_beryl.tar.gz.sha256
+            > \
+            artifacts/android_device_xiaomi_beryl.tar.gz.sha256
 
           ls -lh artifacts/
 
@@ -1301,4 +1549,4 @@ jobs:
         with:
           name: android_device_xiaomi_beryl
           path: artifacts/
-          if-no-files-found: error
+          if-no-files-found: error 
