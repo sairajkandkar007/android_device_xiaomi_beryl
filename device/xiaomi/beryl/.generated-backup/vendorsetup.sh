@@ -1,0 +1,6 @@
+export FOX_AB_DEVICE=1
+export FOX_VIRTUAL_AB_DEVICE=1
+export FOX_INSTALLER_VENDOR_BOOT_RAMDISK_INSTALL=1
+
+add_lunch_combo twrp_beryl-eng
+add_lunch_combo fox_beryl-eng

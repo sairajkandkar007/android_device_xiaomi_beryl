@@ -1,0 +1,15 @@
+Stock vendor_boot recovery information
+
+Device: POCO M7 Pro 5G
+Codename: beryl
+Platform: mt6855
+Boot header: v4
+Vendor boot header: v4
+GKI: yes
+A/B: yes
+Dynamic partitions: yes
+
+Stock recovery ramdisk components are supplied by vendor_boot.
+Recovery modules and MTK recovery init scripts must come from the
+stock vendor_boot image and must not be replaced with fabricated
+implementations.
