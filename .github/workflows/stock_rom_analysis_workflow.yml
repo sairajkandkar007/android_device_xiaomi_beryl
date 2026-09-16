@@ -5,11 +5,11 @@ on:
     inputs:
       rom_url:
         description: "Direct stock ROM URL (Xiaomi recovery ROM ZIP or compatible archive)"
-        required: false
+        required: true
         type: string
       rom_version:
         description: "ROM version/build label"
-        required: false
+        required: true
         default: "unknown"
         type: string
       commit_reports:
