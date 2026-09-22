@@ -8,22 +8,46 @@ permissions:
 
 jobs:
   analyze-vendor-dlkm:
+    name: Analyze vendor_dlkm
     runs-on: ubuntu-24.04
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # INSTALL TOOLS
+      # ============================================================
+
       - name: Install analysis tools
         run: |
+          set -e
+
           sudo apt-get update
+
           sudo apt-get install -y \
             erofs-utils \
             file \
             binutils \
             kmod \
             lz4 \
-            python3
+            python3 \
+            python3-pip
+
+          echo "Installed tools:"
+          erofsfuse --version 2>/dev/null || true
+          fsck.erofs --help | head -n 5 || true
+          modinfo --version || true
+          lz4 --version || true
+
+      # ============================================================
+      # FIND LATEST RELEASE
+      # ============================================================
 
       - name: Find latest release asset
         env:
@@ -32,26 +56,38 @@ jobs:
           set -e
 
           mkdir -p analysis/image
+          mkdir -p analysis/report
+          mkdir -p analysis/extracted
+
+          echo "Repository:"
+          echo "$GITHUB_REPOSITORY"
 
           gh release view \
             --repo "$GITHUB_REPOSITORY" \
-            --json tagName,name,assets \
+            --json tagName,name,publishedAt,assets \
             > analysis/release.json
 
           python3 <<'PY'
           import json
           import sys
 
-          data = json.load(open("analysis/release.json"))
+          with open("analysis/release.json") as f:
+              data = json.load(f)
 
-          print("Release:", data["name"])
-          print("Tag:", data["tagName"])
+          print("Release name:", data.get("name"))
+          print("Release tag:", data.get("tagName"))
+          print("Published:", data.get("publishedAt"))
 
           assets = data.get("assets", [])
 
+          print()
+          print("Release assets:")
+
           for asset in assets:
-              name = asset["name"]
-              print("Asset:", name)
+              print(
+                  f"  {asset['name']} "
+                  f"({asset['size']} bytes)"
+              )
 
           matches = [
               a for a in assets
@@ -60,18 +96,34 @@ jobs:
           ]
 
           if not matches:
-              print("\nERROR: No vendor_dlkm .img asset found.")
+              print()
+              print("ERROR: vendor_dlkm image not found.")
               sys.exit(1)
 
-          asset = matches[0]
+          # Prefer the exact name if it exists.
+          exact = [
+              a for a in matches
+              if a["name"].lower() == "vendor_dlkm.img"
+          ]
 
-          print("\nSelected asset:")
-          print(asset["name"])
-          print(asset["url"])
+          asset = exact[0] if exact else matches[0]
 
-          open("analysis/asset_name.txt", "w").write(asset["name"])
-          open("analysis/asset_url.txt", "w").write(asset["url"])
+          print()
+          print("Selected asset:")
+          print("  Name:", asset["name"])
+          print("  Size:", asset["size"])
+          print("  URL:", asset["url"])
+
+          with open("analysis/asset_name.txt", "w") as f:
+              f.write(asset["name"])
+
+          with open("analysis/asset_url.txt", "w") as f:
+              f.write(asset["url"])
           PY
+
+      # ============================================================
+      # DOWNLOAD
+      # ============================================================
 
       - name: Download vendor_dlkm
         env:
@@ -81,7 +133,8 @@ jobs:
 
           ASSET="$(cat analysis/asset_name.txt)"
 
-          echo "Downloading: $ASSET"
+          echo "Downloading:"
+          echo "$ASSET"
 
           gh release download \
             --repo "$GITHUB_REPOSITORY" \
@@ -89,67 +142,137 @@ jobs:
             --dir analysis/image \
             --clobber
 
-          mv "analysis/image/$ASSET" \
-             analysis/image/vendor_dlkm.img
+          # gh already preserves the release asset filename.
+          # Rename only when it is actually different.
+          if [ "$ASSET" != "vendor_dlkm.img" ]; then
+            mv \
+              "analysis/image/$ASSET" \
+              "analysis/image/vendor_dlkm.img"
+          fi
 
+          echo
+          echo "Downloaded image:"
           ls -lh analysis/image/vendor_dlkm.img
 
+          echo
+          echo "SHA-256:"
           sha256sum analysis/image/vendor_dlkm.img \
-            | tee analysis/report_image_sha256.txt
+            | tee analysis/report/image_sha256.txt
 
-      - name: Inspect image
-        run: |
-          mkdir -p analysis/report analysis/extracted
+      # ============================================================
+      # IMAGE INSPECTION
+      # ============================================================
 
-          file analysis/image/vendor_dlkm.img \
-            | tee analysis/report/image_type.txt
-
-          stat analysis/image/vendor_dlkm.img \
-            | tee analysis/report/image_stat.txt
-
-      - name: Extract EROFS
+      - name: Inspect vendor_dlkm image
         run: |
           set -e
+
+          {
+            echo "=== FILE ==="
+            file analysis/image/vendor_dlkm.img
+
+            echo
+            echo "=== STAT ==="
+            stat analysis/image/vendor_dlkm.img
+
+            echo
+            echo "=== SHA256 ==="
+            sha256sum analysis/image/vendor_dlkm.img
+          } | tee analysis/report/image_info.txt
+
+      # ============================================================
+      # EROFS EXTRACTION
+      # ============================================================
+
+      - name: Extract EROFS filesystem
+        run: |
+          set -e
+
+          echo "Extracting vendor_dlkm..."
 
           fsck.erofs \
             --extract=analysis/extracted \
             analysis/image/vendor_dlkm.img \
             2>&1 | tee analysis/report/erofs_extract.log
 
-      - name: Inventory files
+          echo
+          echo "Extraction complete."
+
+          find analysis/extracted -maxdepth 4 -type f \
+            | sort \
+            | head -n 100
+
+      # ============================================================
+      # COMPLETE FILE INVENTORY
+      # ============================================================
+
+      - name: Build file inventory
         run: |
-          find analysis/extracted -type f \
+          set -e
+
+          find analysis/extracted \
+            -type f \
             | sort \
             > analysis/report/all_files.txt
 
-          find analysis/extracted -type f -name '*.ko' \
+          find analysis/extracted \
+            -type f \
+            -name '*.ko' \
             | sort \
             > analysis/report/modules.txt
 
-          find analysis/extracted -type f \
-            \( -name '*.bin' \
-            -o -name '*.fw' \
-            -o -name '*.img' \) \
+          find analysis/extracted \
+            -type f \
+            \( \
+              -name '*.bin' \
+              -o -name '*.fw' \
+              -o -name '*.img' \
+              -o -name '*.hex' \
+            \) \
             | sort \
             > analysis/report/firmware_candidates.txt
 
-          echo "Modules:"
-          wc -l analysis/report/modules.txt
+          echo "Total files:"
+          wc -l < analysis/report/all_files.txt
 
-          echo "Firmware candidates:"
-          wc -l analysis/report/firmware_candidates.txt
+          echo "Kernel modules:"
+          wc -l < analysis/report/modules.txt
 
-      - name: Analyze module metadata
+          echo "Possible firmware files:"
+          wc -l < analysis/report/firmware_candidates.txt
+
+      # ============================================================
+      # LOCATE MODULE DIRECTORY
+      # ============================================================
+
+      - name: Locate module directory
         run: |
           set -e
 
           MODDIR="$(dirname "$(find analysis/extracted \
-            -type f -name modules.dep | head -n1)")"
+            -type f \
+            -name modules.dep \
+            | head -n 1)")"
+
+          if [ -z "$MODDIR" ]; then
+            echo "ERROR: modules.dep not found."
+            exit 1
+          fi
 
           echo "$MODDIR" \
-            > analysis/report/module_directory.txt
+            | tee analysis/report/module_directory.txt
 
-          for f in \
+      # ============================================================
+      # COPY MODULE METADATA
+      # ============================================================
+
+      - name: Collect module metadata
+        run: |
+          set -e
+
+          MODDIR="$(cat analysis/report/module_directory.txt)"
+
+          for file in \
             modules.dep \
             modules.load \
             modules.alias \
@@ -157,13 +280,23 @@ jobs:
             modules.symbols \
             modules.symbols.bin
           do
-            if [ -f "$MODDIR/$f" ]; then
-              cp "$MODDIR/$f" \
-                 "analysis/report/$f"
-            fi
-          done
+            if [ -f "$MODDIR/$file" ]; then
+              cp \
+                "$MODDIR/$file" \
+                "analysis/report/$file"
 
-      - name: Check dependency completeness
+              echo "FOUND: $file"
+            else
+              echo "MISSING: $file"
+            fi
+          done \
+            | tee analysis/report/module_metadata_status.txt
+
+      # ============================================================
+      # DEPENDENCY COMPLETENESS
+      # ============================================================
+
+      - name: Analyze modules.dep
         run: |
           python3 <<'PY'
           from pathlib import Path
@@ -174,19 +307,19 @@ jobs:
           dep_files = list(root.rglob("modules.dep"))
 
           if not dep_files:
-              (report / "missing_dependencies.txt").write_text(
-                  "modules.dep not found\n"
-              )
-              raise SystemExit(0)
+              print("modules.dep not found")
+              raise SystemExit(1)
 
           dep = dep_files[0]
 
           available = {
-              p.name for p in root.rglob("*.ko")
+              p.name
+              for p in root.rglob("*.ko")
           }
 
           missing = set()
           entries = 0
+          dependency_count = 0
 
           for line in dep.read_text(
               errors="replace"
@@ -197,89 +330,217 @@ jobs:
 
               entries += 1
 
-              _, dependencies = line.split(":", 1)
+              _, dependencies = line.split(
+                  ":",
+                  1
+              )
 
               for item in dependencies.split():
                   name = Path(item).name
 
-                  if (
-                      name.endswith(".ko")
-                      and name not in available
-                  ):
-                      missing.add(name)
+                  if name.endswith(".ko"):
+                      dependency_count += 1
+
+                      if name not in available:
+                          missing.add(name)
 
           output = [
+              "MODULE DEPENDENCY ANALYSIS",
+              "==========================",
               f"modules.dep entries: {entries}",
-              f"available modules: {len(available)}",
+              f"available .ko files: {len(available)}",
+              f"dependency references: {dependency_count}",
               f"missing dependencies: {len(missing)}",
               "",
           ]
 
-          output.extend(sorted(missing))
+          if missing:
+              output.append("MISSING MODULES:")
+              output.extend(sorted(missing))
+          else:
+              output.append(
+                  "RESULT: No missing .ko dependencies."
+              )
 
-          (report / "missing_dependencies.txt").write_text(
-              "\n".join(output) + "\n"
-          )
+          text = "\n".join(output) + "\n"
 
-          print("\n".join(output))
+          print(text)
+
+          (
+              report /
+              "missing_dependencies.txt"
+          ).write_text(text)
           PY
 
-      - name: Analyze touch driver
+      # ============================================================
+      # MODULES.LOAD VALIDATION
+      # ============================================================
+
+      - name: Validate modules.load
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path("analysis/extracted")
+          report = Path("analysis/report")
+
+          loads = list(root.rglob("modules.load"))
+
+          if not loads:
+              print("modules.load not found")
+              raise SystemExit(0)
+
+          load_file = loads[0]
+
+          available = {
+              p.name
+              for p in root.rglob("*.ko")
+          }
+
+          entries = []
+          missing = []
+
+          for line in load_file.read_text(
+              errors="replace"
+          ).splitlines():
+
+              line = line.strip()
+
+              if not line or line.startswith("#"):
+                  continue
+
+              name = Path(line).name
+
+              entries.append(name)
+
+              if name not in available:
+                  missing.append(name)
+
+          output = [
+              "MODULES.LOAD ANALYSIS",
+              "=====================",
+              f"modules.load entries: {len(entries)}",
+              f"missing loaded modules: {len(missing)}",
+              "",
+          ]
+
+          if missing:
+              output.append("MISSING:")
+              output.extend(sorted(missing))
+          else:
+              output.append(
+                  "RESULT: Every modules.load entry exists."
+              )
+
+          text = "\n".join(output) + "\n"
+
+          print(text)
+
+          (
+              report /
+              "modules_load_check.txt"
+          ).write_text(text)
+          PY
+
+      # ============================================================
+      # VERMAGIC ANALYSIS
+      # ============================================================
+
+      - name: Analyze module vermagic
         run: |
           set +e
 
-          MOD="$(find analysis/extracted \
-            -type f \
-            -name 'fts_touch_i2c.ko' \
-            | head -n1)"
-
-          if [ -z "$MOD" ]; then
-            echo "fts_touch_i2c.ko NOT FOUND" \
-              | tee analysis/report/touch_driver.txt
-            exit 0
-          fi
-
-          echo "Touch driver:"
-          echo "$MOD"
-
-          modinfo "$MOD" \
-            | tee analysis/report/fts_touch_modinfo.txt
-
-          echo
-          echo "Firmware references:"
-
-          strings -a "$MOD" |
-            grep -Ei \
-            'firmware|request_firmware|\.bin|\.fw|/odm/|/vendor/' \
-            | sort -u \
-            | tee analysis/report/fts_firmware_strings.txt
-
-      - name: Analyze all firmware references
-        run: |
-          set +e
-
-          : > analysis/report/firmware_references.txt
+          : > analysis/report/vermagic.txt
 
           while IFS= read -r module
           do
-            if strings -a "$module" 2>/dev/null |
-              grep -Eiq \
-              'request_firmware|/odm/firmware|/vendor/firmware'
-            then
+            name="$(basename "$module")"
 
-              {
-                echo "================================"
-                echo "$module"
-                echo "================================"
+            vermagic="$(
+              modinfo \
+                -F vermagic \
+                "$module" \
+                2>/dev/null
+            )"
 
-                strings -a "$module" |
-                  grep -Ei \
-                  'request_firmware|firmware|\.bin|\.fw|/odm/|/vendor/'
-
-                echo
-              } >> analysis/report/firmware_references.txt
+            if [ -z "$vermagic" ]; then
+              vermagic="UNAVAILABLE"
             fi
+
+            printf "%-45s %s\n" \
+              "$name" \
+              "$vermagic" \
+              >> analysis/report/vermagic.txt
+
           done < analysis/report/modules.txt
+
+          echo "VERMAGIC:"
+          cat analysis/report/vermagic.txt
+
+      - name: Summarize vermagic variants
+        run: |
+          awk '
+          {
+            $1="";
+            sub(/^ /,"");
+            print
+          }
+          ' analysis/report/vermagic.txt \
+            | sort \
+            | uniq -c \
+            | sort -nr \
+            > analysis/report/vermagic_summary.txt
+
+      # ============================================================
+      # TOUCH DRIVER
+      # ============================================================
+
+      - name: Analyze FTS touch driver
+        run: |
+          set +e
+
+          MOD="$(
+            find analysis/extracted \
+              -type f \
+              -name 'fts_touch_i2c.ko' \
+              | head -n 1
+          )"
+
+          if [ -z "$MOD" ]; then
+            echo "fts_touch_i2c.ko NOT FOUND" \
+              | tee analysis/report/touch_driver_status.txt
+            exit 0
+          fi
+
+          echo "Found:"
+          echo "$MOD"
+
+          modinfo "$MOD" \
+            > analysis/report/fts_touch_modinfo.txt \
+            2>&1
+
+          {
+            echo "=== FTS TOUCH DRIVER ==="
+            echo "$MOD"
+
+            echo
+            echo "=== MODINFO ==="
+            cat analysis/report/fts_touch_modinfo.txt
+
+            echo
+            echo "=== FIRMWARE REFERENCES ==="
+
+            strings -a "$MOD" |
+              grep -Ei \
+              'request_firmware|firmware|\.bin|\.fw|/odm/|/vendor/' |
+              sort -u ||
+              true
+
+          } | tee analysis/report/fts_touch_analysis.txt
+
+      # ============================================================
+      # TOUCH DEPENDENCY CHAIN
+      # ============================================================
 
       - name: Check touch dependency chain
         run: |
@@ -301,74 +562,273 @@ jobs:
           ]
 
           available = {
-              p.name for p in root.rglob("*.ko")
+              p.name
+              for p in root.rglob("*.ko")
           }
 
-          lines = []
+          lines = [
+              "BERYL TOUCH DEPENDENCY CHAIN",
+              "============================",
+              "",
+          ]
 
           for module in required:
-              state = (
+              status = (
                   "PRESENT"
                   if module in available
                   else "MISSING"
               )
 
               lines.append(
-                  f"{module}: {state}"
+                  f"{module}: {status}"
               )
 
-          output = "\n".join(lines) + "\n"
+          text = "\n".join(lines) + "\n"
 
-          print(output)
+          print(text)
 
-          (report / "touch_dependency_check.txt").write_text(
-              output
-          )
+          (
+              report /
+              "touch_dependency_check.txt"
+          ).write_text(text)
           PY
 
-      - name: Search firmware directories
+      # ============================================================
+      # ALL FIRMWARE REFERENCES
+      # ============================================================
+
+      - name: Search modules for firmware references
         run: |
+          set +e
+
+          : > analysis/report/firmware_references.txt
+
+          while IFS= read -r module
+          do
+            references="$(
+              strings -a "$module" 2>/dev/null |
+              grep -Ei \
+              'request_firmware|/odm/firmware|/vendor/firmware|\.bin|\.fw' |
+              sort -u
+            )"
+
+            if [ -n "$references" ]; then
+              {
+                echo "========================================"
+                echo "MODULE: $module"
+                echo "========================================"
+                echo "$references"
+                echo
+              } >> analysis/report/firmware_references.txt
+            fi
+
+          done < analysis/report/modules.txt
+
+      # ============================================================
+      # FIRMWARE FILE INVENTORY
+      # ============================================================
+
+      - name: Analyze firmware locations
+        run: |
+          set -e
+
           find analysis/extracted \
             -type d \
-            \( -iname '*firmware*' \
-            -o -path '*/odm/*' \
-            -o -path '*/vendor/*' \) \
+            \( \
+              -iname '*firmware*' \
+              -o -path '*/odm/*' \
+              -o -path '*/vendor/*' \
+            \) \
             | sort \
             > analysis/report/firmware_directories.txt
 
-      - name: Generate summary
+          {
+            echo "=== FIRMWARE DIRECTORIES ==="
+            cat analysis/report/firmware_directories.txt
+
+            echo
+            echo "=== FIRMWARE FILE CANDIDATES ==="
+            cat analysis/report/firmware_candidates.txt
+          } | tee analysis/report/firmware_inventory.txt
+
+      # ============================================================
+      # MODULE COUNT BY CATEGORY
+      # ============================================================
+
+      - name: Categorize modules
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          from collections import Counter
+
+          modules = [
+              p.name
+              for p in Path("analysis/extracted").rglob("*.ko")
+          ]
+
+          categories = {
+              "touch": [
+                  "touch",
+                  "tp",
+                  "fts",
+                  "goodix",
+                  "focal"
+              ],
+              "display": [
+                  "disp",
+                  "mdp",
+                  "panel",
+                  "dsi",
+                  "pwm",
+                  "backlight"
+              ],
+              "camera": [
+                  "camera",
+                  "cam",
+                  "isp"
+              ],
+              "audio": [
+                  "audio",
+                  "afe",
+                  "sound"
+              ],
+              "storage": [
+                  "ufs",
+                  "mmc",
+                  "sd",
+                  "storage"
+              ],
+              "usb": [
+                  "usb",
+                  "typec"
+              ],
+              "thermal": [
+                  "thermal",
+                  "cooling"
+              ],
+              "power": [
+                  "charger",
+                  "battery",
+                  "power"
+              ],
+          }
+
+          counts = Counter()
+
+          for module in modules:
+              lower = module.lower()
+
+              matched = False
+
+              for category, keywords in categories.items():
+                  if any(
+                      key in lower
+                      for key in keywords
+                  ):
+                      counts[category] += 1
+                      matched = True
+                      break
+
+              if not matched:
+                  counts["other"] += 1
+
+          lines = [
+              "MODULE CATEGORY SUMMARY",
+              "=======================",
+              ""
+          ]
+
+          for category, count in counts.most_common():
+              lines.append(
+                  f"{category}: {count}"
+              )
+
+          text = "\n".join(lines) + "\n"
+
+          print(text)
+
+          Path(
+              "analysis/report/module_categories.txt"
+          ).write_text(text)
+          PY
+
+      # ============================================================
+      # FINAL SUMMARY
+      # ============================================================
+
+      - name: Generate final summary
         run: |
           {
+            echo "================================================"
             echo "BERYL vendor_dlkm ANALYSIS"
-            echo "=========================="
+            echo "================================================"
             echo
-            echo "Release:"
+
+            echo "REPOSITORY:"
+            echo "$GITHUB_REPOSITORY"
+            echo
+
+            echo "RELEASE:"
             cat analysis/release.json
             echo
-            echo "SHA256:"
-            cat analysis/report_image_sha256.txt
+
+            echo "IMAGE:"
+            cat analysis/report/image_info.txt
             echo
+
             echo "MODULE COUNT:"
             wc -l < analysis/report/modules.txt
             echo
+
             echo "DEPENDENCY CHECK:"
             cat analysis/report/missing_dependencies.txt
             echo
+
+            echo "MODULES.LOAD CHECK:"
+            cat analysis/report/modules_load_check.txt
+            echo
+
             echo "TOUCH DEPENDENCY CHECK:"
             cat analysis/report/touch_dependency_check.txt
             echo
-            echo "FTS TOUCH FIRMWARE REFERENCES:"
-            cat analysis/report/fts_firmware_strings.txt
+
+            echo "VERMAGIC SUMMARY:"
+            cat analysis/report/vermagic_summary.txt
             echo
-            echo "FIRMWARE CANDIDATES:"
-            cat analysis/report/firmware_candidates.txt
-          } > analysis/report/SUMMARY.txt
 
-          cat analysis/report/SUMMARY.txt
+            echo "MODULE CATEGORIES:"
+            cat analysis/report/module_categories.txt
+            echo
 
-      - name: Upload analysis report
+            echo "TOUCH FIRMWARE REFERENCES:"
+            cat analysis/report/fts_touch_analysis.txt
+            echo
+
+            echo "FIRMWARE INVENTORY:"
+            cat analysis/report/firmware_inventory.txt
+
+          } | tee analysis/report/SUMMARY.txt
+
+      # ============================================================
+      # UPLOAD REPORT
+      # ============================================================
+
+      - name: Upload complete analysis
         uses: actions/upload-artifact@v4
         with:
           name: beryl-vendor-dlkm-analysis
           path: analysis/report/
+          if-no-files-found: error
           retention-days: 30
+
+      # ============================================================
+      # UPLOAD EXTRACTED MODULES
+      # ============================================================
+
+      - name: Upload extracted module tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: beryl-vendor-dlkm-extracted
+          path: analysis/extracted/
+          if-no-files-found: error
+          retention-days: 7
