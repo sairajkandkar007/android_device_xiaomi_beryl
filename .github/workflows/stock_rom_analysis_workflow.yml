@@ -1,415 +1,374 @@
-name: Beryl Stock ROM Extract & Analyze
+name: Analyze beryl vendor_dlkm
 
 on:
   workflow_dispatch:
-    inputs:
-      rom_url:
-        description: "Direct stock ROM URL (Xiaomi recovery ROM ZIP or compatible archive)"
-        required: false
-        type: string
-      rom_version:
-        description: "ROM version/build label"
-        required: false
-        default: "unknown"
-        type: string
-      commit_reports:
-        description: "Commit analysis reports to the repository (never commits stock binaries)"
-        required: false
-        default: false
-        type: boolean
-  schedule:
-    - cron: "0 0 * * 0"
 
 permissions:
-  contents: write
-
-concurrency:
-  group: beryl-stock-rom-analysis
-  cancel-in-progress: false
-
-env:
-  PYTHONUNBUFFERED: "1"
-  OUTPUT_DIR: "rom_analysis_output"
-  STOCK_ROM_URL: ${{ vars.STOCK_ROM_URL }}
+  contents: read
 
 jobs:
-  analyze:
-    name: Download, extract and analyze Beryl stock ROM
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
+  analyze-vendor-dlkm:
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.24"
 
       - name: Install analysis tools
-        shell: bash
         run: |
-          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y lz4 liblz4-dev xz-utils liblzma-dev zlib1g-dev unzip p7zip-full
-          echo "Installing payload-dumper-go..."
-          # payload-dumper-go has a Go/XZ dependency that needs lzma.h.
-          # liblzma-dev above provides the required development header.
-          go install github.com/ssut/payload-dumper-go@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-          export PATH="$(go env GOPATH)/bin:$PATH"
-          lz4 --version
-          payload-dumper-go --help | head -40
+          sudo apt-get install -y \
+            erofs-utils \
+            file \
+            binutils \
+            kmod \
+            lz4 \
+            python3
 
-      # The complete analyzer is embedded below. The repository only needs this YAML file.
-      - name: Create embedded rom_analyzer.py
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > rom_analyzer.py <<'PY_ANALYZER'
-          #!/usr/bin/env python3
-          """
-          POCO M7 Pro 5G (beryl) stock ROM analyzer - workflow-safe edition.
-          
-          The analyzer is intentionally evidence-first. It can:
-            * download a Xiaomi ROM ZIP
-            * recursively extract ZIP/TAR/GZIP archives
-            * detect Android boot/vendor_boot images by magic
-            * extract vendor_boot v3/v4 ramdisk fragments and DTB
-            * decompress LZ4 ramdisks and parse newc CPIO
-            * detect payload.bin and invoke payload-dumper-go when available
-            * re-scan images produced from payload.bin
-            * produce a report and fail when no Android image/payload evidence is found
-          
-          It does not blindly copy stock binaries into a device tree.
-          """
-          from __future__ import annotations
-          import argparse, hashlib, json, os, re, shutil, stat, subprocess, sys, tarfile, urllib.request, zipfile
-          from collections import Counter
-          from datetime import datetime, timezone
-          from pathlib import Path
-          
-          DEVICE="beryl"; SOC="mt6855"; CHUNK=4*1024*1024; MAX_ARCHIVE_DEPTH=6
-          
-          def log(s=""): print(s, flush=True)
-          def sha256(p):
-              h=hashlib.sha256()
-              with open(p,"rb") as f:
-                  while True:
-                      b=f.read(CHUNK)
-                      if not b: break
-                      h.update(b)
-              return h.hexdigest()
-          def safe(base,name):
-              name=name.replace('\\','/')
-              q=Path(name)
-              if q.is_absolute() or '..' in q.parts: raise ValueError('unsafe path: '+name)
-              d=(base/q).resolve(); br=base.resolve()
-              if d!=br and br not in d.parents: raise ValueError('archive traversal: '+name)
-              return d
-          def extract_zip(src,dst):
-              n=0
-              with zipfile.ZipFile(src) as z:
-                  for i in z.infolist():
-                      d=safe(dst,i.filename)
-                      if i.is_dir(): d.mkdir(parents=True,exist_ok=True); continue
-                      d.parent.mkdir(parents=True,exist_ok=True)
-                      with z.open(i) as a, open(d,'wb') as b: shutil.copyfileobj(a,b,CHUNK)
-                      n+=1
-              return n
-          def extract_tar(src,dst):
-              n=0
-              with tarfile.open(src,'r:*') as t:
-                  for m in t.getmembers():
-                      d=safe(dst,m.name)
-                      if m.isdir(): d.mkdir(parents=True,exist_ok=True); continue
-                      if not m.isfile(): continue
-                      d.parent.mkdir(parents=True,exist_ok=True)
-                      x=t.extractfile(m)
-                      if x:
-                          with x,open(d,'wb') as b: shutil.copyfileobj(x,b,CHUNK)
-                          n+=1
-              return n
-          def archive_kind(p):
-              try:
-                  with open(p,'rb') as f: m=f.read(8)
-              except: return None
-              if m.startswith(b'PK\x03\x04'): return 'zip'
-              if m.startswith(b'\x1f\x8b'): return 'gzip'
-              return None
-          def extract_archive(p,d):
-              k=archive_kind(p)
-              if k=='zip': return extract_zip(p,d)
-              if k=='gzip':
-                  try: return extract_tar(p,d)
-                  except tarfile.ReadError:
-                      import gzip
-                      out=d/(p.stem+'.out'); out.parent.mkdir(parents=True,exist_ok=True)
-                      with gzip.open(p,'rb') as a,open(out,'wb') as b: shutil.copyfileobj(a,b,CHUNK)
-                      return 1
-              return 0
-          def download(url,dst):
-              req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 BerylStockAnalyzer/2.0','Accept':'*/*'})
-              part=dst.with_suffix('.part')
-              with urllib.request.urlopen(req,timeout=120) as r,open(part,'wb') as f:
-                  total=int(r.headers.get('Content-Length') or 0); done=0
-                  while True:
-                      b=r.read(CHUNK)
-                      if not b: break
-                      f.write(b); done+=len(b)
-                      if total: print(f'\r  {done/2**30:.2f}/{total/2**30:.2f} GiB',end='',flush=True)
-              if total: print()
-              part.replace(dst)
-              return dst
-          
-          def u32(b,o): return int.from_bytes(b[o:o+4],'little')
-          def u64(b,o): return int.from_bytes(b[o:o+8],'little')
-          def align(n,p): return ((n+p-1)//p)*p
-          
-          def parse_image(p):
-              with open(p,'rb') as f: h=f.read(4096)
-              if h[:8]==b'ANDROID!':
-                  hv=u32(h,40); return {'type':'boot','header_version':hv,'page_size':u32(h,36),'kernel_size':u32(h,8),'ramdisk_size':u32(h,12)}
-              if h[:8]==b'VNDRBOOT':
-                  hv=u32(h,8); out={'type':'vendor_boot','header_version':hv,'page_size':u32(h,12),'vendor_ramdisk_size':u32(h,24)}
-                  if len(h)>=2112:
-                      out.update(header_size=u32(h,2096),dtb_size=u32(h,2100),dtb_addr=u64(h,2104))
-                  if hv>=4 and len(h)>=2128:
-                      out.update(vendor_ramdisk_table_size=u32(h,2112),vendor_ramdisk_table_entry_num=u32(h,2116),vendor_ramdisk_table_entry_size=u32(h,2120),bootconfig_size=u32(h,2124))
-                  return out
-              if h[:4]==b'\x3a\xff\x26\xed': return {'type':'android_sparse'}
-              return None
-          
-          def run(cmd,timeout=900):
-              try:
-                  p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout,text=True)
-                  return p.returncode,p.stdout,p.stderr
-              except Exception as e: return 127,'',str(e)
-          
-          def extract_vendor_boot(img,out):
-              m=parse_image(img)
-              if not m or m['type']!='vendor_boot': return None
-              out.mkdir(parents=True,exist_ok=True); ps=m['page_size']; hs=m.get('header_size',ps); start=align(hs,ps); size=m['vendor_ramdisk_size']
-              with open(img,'rb') as f:
-                  f.seek(start); blob=f.read(size); raw=out/'vendor_ramdisk.lz4'; raw.write_bytes(blob)
-                  dtbs=m.get('dtb_size',0)
-                  if dtbs:
-                      f.seek(start+align(size,ps)); (out/'stock.dtb').write_bytes(f.read(dtbs))
-                  if m.get('header_version',0)>=4 and m.get('vendor_ramdisk_table_size',0):
-                      off=start+align(size,ps)+align(dtbs,ps); f.seek(off); t=f.read(m['vendor_ramdisk_table_size']); (out/'vendor_ramdisk_table.bin').write_bytes(t)
-                      es=m.get('vendor_ramdisk_table_entry_size',0); entries=[]
-                      for i in range(m.get('vendor_ramdisk_table_entry_num',0)):
-                          e=t[i*es:(i+1)*es]
-                          if len(e)<108: break
-                          entries.append({'index':i,'size':u32(e,0),'offset':u32(e,4),'type':u32(e,8),'name':e[12:44].split(b'\0',1)[0].decode(errors='replace')})
-                      (out/'vendor_ramdisk_table.json').write_text(json.dumps(entries,indent=2))
-              lz4=shutil.which('lz4')
-              if not lz4: return {'meta':m,'raw':str(raw),'lz4':False,'error':'lz4 not installed'}
-              cpio=out/'vendor_ramdisk.cpio'; rc,_,err=run([lz4,'-d','-f',str(raw),str(cpio)],900)
-              if rc!=0: return {'meta':m,'raw':str(raw),'lz4':False,'error':err[-2000:]}
-              rd=out/'ramdisk'; rd.mkdir(exist_ok=True)
-              try: count=cpio_extract(cpio,rd)
-              except Exception as e: return {'meta':m,'raw':str(raw),'cpio':str(cpio),'lz4':True,'cpio_error':str(e)}
-              return {'meta':m,'raw':str(raw),'cpio':str(cpio),'ramdisk':str(rd),'lz4':True,'cpio_files':count}
-          
-          def cpio_extract(src,dst):
-              data=src.read_bytes(); pos=0; count=0
-              while pos+110<=len(data):
-                  magic=data[pos:pos+6]
-                  if magic not in (b'070701',b'070702'): raise ValueError(f'bad newc header at {pos}: {magic!r}')
-                  def fld(o): return int(data[pos+o:pos+o+8],16)
-                  mode=fld(14); size=fld(54); namesz=fld(94); ns=pos+110; ne=ns+namesz
-                  if ne>len(data): raise ValueError('truncated cpio name')
-                  name=data[ns:ne].rstrip(b'\0').decode('utf-8','replace'); ds=(ne+3)&~3; de=ds+size; pos=(de+3)&~3
-                  if name=='TRAILER!!!': break
-                  target=safe(dst,name); target.parent.mkdir(parents=True,exist_ok=True)
-                  if stat.S_ISDIR(mode): target.mkdir(exist_ok=True)
-                  elif stat.S_ISLNK(mode):
-                      link=data[ds:de].decode('utf-8','replace')
-                      try: target.unlink()
-                      except: pass
-                      if os.path.isabs(link) or '..' in Path(link).parts: target.write_text(link)
-                      else: target.symlink_to(link)
-                  else:
-                      target.write_bytes(data[ds:de])
-                      try: os.chmod(target,mode&0o7777)
-                      except: pass
-                  count+=1
-              return count
-          
-          def find_payloads(root): return [p for p in root.rglob('payload.bin') if p.is_file()]
-          def extract_payload(payload,out):
-              exe=shutil.which('payload-dumper-go') or shutil.which('payload_dumper')
-              if not exe: return {'ok':False,'error':'payload-dumper-go not installed'}
-              out.mkdir(parents=True,exist_ok=True)
-              parts=os.environ.get('PAYLOAD_PARTITIONS','boot,vendor_boot,dtbo,vendor_dlkm,vbmeta,vbmeta_system,vbmeta_vendor')
-              rc,stdout,stderr=run([exe,'-o',str(out),'-p',parts,str(payload)],timeout=3600)
-              return {'ok':rc==0,'stdout':stdout[-5000:],'stderr':stderr[-5000:],'output':str(out)}
-          
-          def scan(root):
-              cats=Counter(); targets={k:[] for k in ['fstab','recovery_init','ueventd','modules_load_recovery','plpath','dtb','selinux','crypto_related','images','payload']}; files=[]
-              for p in root.rglob('*'):
-                  if not p.is_file(): continue
-                  rel=str(p.relative_to(root)); n=p.name.lower(); files.append(rel)
-                  if n=='payload.bin': targets['payload'].append(rel)
-                  m=parse_image(p)
-                  if m: targets['images'].append({'path':rel,**m}); cats[m['type']]+=1
-                  if 'fstab' in n: targets['fstab'].append(rel); cats['fstab']+=1
-                  if n.startswith('init.recovery') or n=='recovery.rc': targets['recovery_init'].append(rel); cats['init']+=1
-                  if n.startswith('ueventd'): targets['ueventd'].append(rel); cats['ueventd']+=1
-                  if n=='modules.load.recovery': targets['modules_load_recovery'].append(rel); cats['modules']+=1
-                  if n=='mtk_plpath_utils': targets['plpath'].append(rel); cats['plpath']+=1
-                  if n.endswith('.dtb') or '.dtbo' in n: targets['dtb'].append(rel); cats['dtb']+=1
-                  if any(x in n for x in ['file_contexts','service_contexts','hwservice_contexts','vendor_service_contexts','genfs_contexts','seapp_contexts']): targets['selinux'].append(rel); cats['selinux']+=1
-                  if any(x in n for x in ['vold','crypt','crypto','keymaster','gatekeeper','tee']): targets['crypto_related'].append(rel); cats['crypto']+=1
-              return cats,targets,files
-          
-          def main():
-              ap=argparse.ArgumentParser(); ap.add_argument('source'); ap.add_argument('output',nargs='?',default='rom_analysis_output'); a=ap.parse_args()
-              out=Path(a.output).resolve(); ext=out/'extracted'; out.mkdir(parents=True,exist_ok=True); ext.mkdir(exist_ok=True)
-              src=a.source
-              if re.match(r'^https?://',src,re.I):
-                  archive=out/'stock_rom.zip'; log('Downloading ROM...'); download(src,archive); source=src
-              else:
-                  archive=Path(src).resolve(); source=str(archive)
-              log('SHA256: '+sha256(archive))
-              root=ext/'root'; root.mkdir(exist_ok=True)
-              if archive_kind(archive):
-                  n=extract_archive(archive,root); log(f'Extracted top-level archive members: {n}')
-              else: shutil.copy2(archive,root/archive.name)
-              archives=[str(archive)]; payload_results=[]
-              # Recursively extract nested archives first.
-              for depth in range(MAX_ARCHIVE_DEPTH):
-                  candidates=[]
-                  for p in ext.rglob('*'):
-                      if p.is_file() and archive_kind(p) and p.name!='stock_rom.zip' and '__archive_done__' not in p.parts: candidates.append(p)
-                  if not candidates: break
-                  progress=False
-                  for p in candidates:
-                      marker=ext/'__archive_done__'/hashlib.sha1(str(p).encode()).hexdigest(); marker.parent.mkdir(exist_ok=True)
-                      if marker.exists(): continue
-                      d=p.parent/(p.stem+'_extracted')
-                      try:
-                          n=extract_archive(p,d); marker.write_text(str(n)); archives.append(str(p)); progress=True; log(f'Nested archive: {p.relative_to(ext)} -> {n} files')
-                      except Exception as e: marker.write_text('ERR'); log(f'WARN nested archive {p}: {e}')
-                  if not progress: break
-              # Payload extraction: use payload-dumper-go on every payload.bin discovered.
-              payloads=find_payloads(ext)
-              for p in payloads:
-                  dest=ext/'__payload__'/p.parent.name
-                  log(f'Payload detected: {p.relative_to(ext)}')
-                  r=extract_payload(p,dest); payload_results.append({'path':str(p.relative_to(ext)),**r})
-                  if r.get('ok'): log(f'Payload extracted to {dest}')
-                  else: log('WARN payload extraction failed: '+r.get('error','unknown'))
-              # Process every boot/vendor_boot image now, including payload output.
-              image_results=[]
-              processed=set()
-              for p in list(ext.rglob('*')):
-                  if not p.is_file() or p in processed: continue
-                  m=parse_image(p)
-                  if not m: continue
-                  processed.add(p); item={'path':str(p.relative_to(ext)),**m}
-                  if m['type']=='vendor_boot': item['vendor_boot']=extract_vendor_boot(p,ext/'__vendor_boot__'/p.stem)
-                  image_results.append(item)
-              cats,targets,files=scan(ext)
-              report={'device':DEVICE,'soc':SOC,'generated_utc':datetime.now(timezone.utc).isoformat(),'source':source,'sha256':sha256(archive),'archives':archives,'payloads':payload_results,'images':image_results,'targets':targets,'categories':dict(cats),'file_count':len(files)}
-              ad=out/'analysis'; ad.mkdir(exist_ok=True); prep=out/'device_tree_prep'; prep.mkdir(exist_ok=True)
-              (ad/'analysis_report.json').write_text(json.dumps(report,indent=2))
-              lines=['POCO M7 PRO 5G (BERYL) STOCK ROM EVIDENCE REPORT','='*72,f'Source: {source}',f'SHA256: {report["sha256"]}',f'Files observed: {len(files)}','', 'ANDROID IMAGES','-'*72]
-              lines += [f'  {json.dumps(x,sort_keys=True)}' for x in image_results] or ['  (none)']
-              lines += ['','PAYLOAD EXTRACTION','-'*72] + [f'  {json.dumps(x,sort_keys=True)}' for x in payload_results] or ['  (none)']
-              lines += ['','TARGETED RECOVERY EVIDENCE','-'*72]
-              for k,v in targets.items():
-                  lines.append(k+':'); lines += ['  - '+(json.dumps(x,sort_keys=True) if isinstance(x,dict) else x) for x in v[:200]] or lines.append('  - (none)')
-              lines += ['','CATEGORY COUNTS','-'*72]+[f'  {k}: {v}' for k,v in sorted(cats.items())]
-              (ad/'ANALYSIS_REPORT.txt').write_text('\n'.join(lines)+'\n')
-              (prep/'EVIDENCE_MANIFEST.txt').write_text('\n'.join(files)+'\n')
-              (ad/'DEVICE_TREE_CHECKLIST.txt').write_text('''BERYL STOCK EVIDENCE CHECKLIST\n==============================\n[ ] Confirm vendor_boot v4 header/page size.\n[ ] Confirm stock vendor ramdisk fragments and types.\n[ ] Confirm fstab.mt6855/fstab.emmc/recovery.fstab.\n[ ] Confirm recovery init/ueventd and MTK PLPATH files.\n[ ] Confirm modules.load.recovery and actual .ko files.\n[ ] Confirm stock DTB and DTBO evidence.\n[ ] Confirm Android 14 FBE/inlinecrypt/fsverity entries from stock.\n[ ] Confirm recovery binaries/libraries from actual stock evidence.\n[ ] Do not blindly copy stock binaries into the device tree.\n[ ] Do not enable FOX_VENDOR_BOOT_RECOVERY solely because recovery resources are in vendor_boot.\n''')
-              # Hard failure: this prevents the previous false-success report.
-              if not image_results and not payloads:
-                  raise SystemExit('ERROR: No Android boot/vendor_boot image and no payload.bin were found. The ROM package was not actually unpacked to Android image level.')
-              if not image_results:
-                  raise SystemExit('ERROR: payload.bin was found but no Android images were produced. Check payload-dumper-go output above.')
-              if not any(x.get('type')=='vendor_boot' for x in image_results):
-                  raise SystemExit('ERROR: No vendor_boot image found after archive/payload extraction; refusing to produce a false-success analysis.')
-              if not any(x.get('vendor_boot',{}).get('lz4') for x in image_results if isinstance(x.get('vendor_boot'),dict)):
-                  raise SystemExit('ERROR: vendor_boot was found but its ramdisk was not decompressed/parsed.')
-              log('SUCCESS: vendor_boot and recovery ramdisk evidence extracted.')
-              return 0
-          if __name__=='__main__': raise SystemExit(main())
-          PY_ANALYZER
-          python3 -m py_compile rom_analyzer.py
-          sha256sum rom_analyzer.py
-
-      - name: Run embedded Beryl stock ROM analyzer
+      - name: Find latest release asset
         env:
-          ROM_URL: ${{ steps.input.outputs.url }}
-          PAYLOAD_PARTITIONS: "boot,vendor_boot,dtbo,vendor_dlkm,vbmeta,vbmeta_system,vbmeta_vendor"
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          rm -rf "${OUTPUT_DIR}"
-          python3 rom_analyzer.py "${ROM_URL}" "${OUTPUT_DIR}"
+          set -e
 
-          test -s "${OUTPUT_DIR}/analysis/ANALYSIS_REPORT.txt"
-          test -s "${OUTPUT_DIR}/analysis/analysis_report.json"
-          test -s "${OUTPUT_DIR}/analysis/DEVICE_TREE_CHECKLIST.txt"
-          test -s "${OUTPUT_DIR}/device_tree_prep/EVIDENCE_MANIFEST.txt"
+          mkdir -p analysis/image
 
-      - name: Show analysis summary
-        if: always()
+          gh release view \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,assets \
+            > analysis/release.json
+
+          python3 <<'PY'
+          import json
+          import sys
+
+          data = json.load(open("analysis/release.json"))
+
+          print("Release:", data["name"])
+          print("Tag:", data["tagName"])
+
+          assets = data.get("assets", [])
+
+          for asset in assets:
+              name = asset["name"]
+              print("Asset:", name)
+
+          matches = [
+              a for a in assets
+              if "vendor_dlkm" in a["name"].lower()
+              and a["name"].lower().endswith(".img")
+          ]
+
+          if not matches:
+              print("\nERROR: No vendor_dlkm .img asset found.")
+              sys.exit(1)
+
+          asset = matches[0]
+
+          print("\nSelected asset:")
+          print(asset["name"])
+          print(asset["url"])
+
+          open("analysis/asset_name.txt", "w").write(asset["name"])
+          open("analysis/asset_url.txt", "w").write(asset["url"])
+          PY
+
+      - name: Download vendor_dlkm
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ -f "${OUTPUT_DIR}/analysis/ANALYSIS_REPORT.txt" ]]; then
-            sed -n '1,300p' "${OUTPUT_DIR}/analysis/ANALYSIS_REPORT.txt"
-          else
-            echo "Analysis report was not generated."
-          fi
+          set -e
 
-      - name: Upload analysis reports and evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: beryl-stock-rom-analysis-${{ inputs.rom_version || 'scheduled' }}
-          path: |
-            rom_analysis_output/analysis/
-            rom_analysis_output/device_tree_prep/
-            rom_analysis_output/extracted/**/vendor_ramdisk.lz4
-            rom_analysis_output/extracted/**/vendor_ramdisk.cpio
-            rom_analysis_output/extracted/**/ramdisk/
-          if-no-files-found: warn
-          retention-days: 30
+          ASSET="$(cat analysis/asset_name.txt)"
 
-      - name: Commit reports (optional)
-        if: ${{ inputs.commit_reports == true && github.event_name == 'workflow_dispatch' && success() }}
-        shell: bash
+          echo "Downloading: $ASSET"
+
+          gh release download \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ASSET" \
+            --dir analysis/image \
+            --clobber
+
+          mv "analysis/image/$ASSET" \
+             analysis/image/vendor_dlkm.img
+
+          ls -lh analysis/image/vendor_dlkm.img
+
+          sha256sum analysis/image/vendor_dlkm.img \
+            | tee analysis/report_image_sha256.txt
+
+      - name: Inspect image
         run: |
-          set -euo pipefail
-          rm -rf analysis_reports
-          mkdir -p analysis_reports
-          cp rom_analysis_output/analysis/ANALYSIS_REPORT.txt analysis_reports/
-          cp rom_analysis_output/analysis/analysis_report.json analysis_reports/
-          cp rom_analysis_output/analysis/DEVICE_TREE_CHECKLIST.txt analysis_reports/
-          cp rom_analysis_output/device_tree_prep/EVIDENCE_MANIFEST.txt analysis_reports/
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add analysis_reports/
-          if git diff --cached --quiet; then
-            echo "No report changes to commit."
+          mkdir -p analysis/report analysis/extracted
+
+          file analysis/image/vendor_dlkm.img \
+            | tee analysis/report/image_type.txt
+
+          stat analysis/image/vendor_dlkm.img \
+            | tee analysis/report/image_stat.txt
+
+      - name: Extract EROFS
+        run: |
+          set -e
+
+          fsck.erofs \
+            --extract=analysis/extracted \
+            analysis/image/vendor_dlkm.img \
+            2>&1 | tee analysis/report/erofs_extract.log
+
+      - name: Inventory files
+        run: |
+          find analysis/extracted -type f \
+            | sort \
+            > analysis/report/all_files.txt
+
+          find analysis/extracted -type f -name '*.ko' \
+            | sort \
+            > analysis/report/modules.txt
+
+          find analysis/extracted -type f \
+            \( -name '*.bin' \
+            -o -name '*.fw' \
+            -o -name '*.img' \) \
+            | sort \
+            > analysis/report/firmware_candidates.txt
+
+          echo "Modules:"
+          wc -l analysis/report/modules.txt
+
+          echo "Firmware candidates:"
+          wc -l analysis/report/firmware_candidates.txt
+
+      - name: Analyze module metadata
+        run: |
+          set -e
+
+          MODDIR="$(dirname "$(find analysis/extracted \
+            -type f -name modules.dep | head -n1)")"
+
+          echo "$MODDIR" \
+            > analysis/report/module_directory.txt
+
+          for f in \
+            modules.dep \
+            modules.load \
+            modules.alias \
+            modules.softdep \
+            modules.symbols \
+            modules.symbols.bin
+          do
+            if [ -f "$MODDIR/$f" ]; then
+              cp "$MODDIR/$f" \
+                 "analysis/report/$f"
+            fi
+          done
+
+      - name: Check dependency completeness
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path("analysis/extracted")
+          report = Path("analysis/report")
+
+          dep_files = list(root.rglob("modules.dep"))
+
+          if not dep_files:
+              (report / "missing_dependencies.txt").write_text(
+                  "modules.dep not found\n"
+              )
+              raise SystemExit(0)
+
+          dep = dep_files[0]
+
+          available = {
+              p.name for p in root.rglob("*.ko")
+          }
+
+          missing = set()
+          entries = 0
+
+          for line in dep.read_text(
+              errors="replace"
+          ).splitlines():
+
+              if ":" not in line:
+                  continue
+
+              entries += 1
+
+              _, dependencies = line.split(":", 1)
+
+              for item in dependencies.split():
+                  name = Path(item).name
+
+                  if (
+                      name.endswith(".ko")
+                      and name not in available
+                  ):
+                      missing.add(name)
+
+          output = [
+              f"modules.dep entries: {entries}",
+              f"available modules: {len(available)}",
+              f"missing dependencies: {len(missing)}",
+              "",
+          ]
+
+          output.extend(sorted(missing))
+
+          (report / "missing_dependencies.txt").write_text(
+              "\n".join(output) + "\n"
+          )
+
+          print("\n".join(output))
+          PY
+
+      - name: Analyze touch driver
+        run: |
+          set +e
+
+          MOD="$(find analysis/extracted \
+            -type f \
+            -name 'fts_touch_i2c.ko' \
+            | head -n1)"
+
+          if [ -z "$MOD" ]; then
+            echo "fts_touch_i2c.ko NOT FOUND" \
+              | tee analysis/report/touch_driver.txt
             exit 0
           fi
-          git commit -m "ci: update Beryl stock ROM analysis"
-          git push
 
-      - name: Final status
-        if: always()
+          echo "Touch driver:"
+          echo "$MOD"
+
+          modinfo "$MOD" \
+            | tee analysis/report/fts_touch_modinfo.txt
+
+          echo
+          echo "Firmware references:"
+
+          strings -a "$MOD" |
+            grep -Ei \
+            'firmware|request_firmware|\.bin|\.fw|/odm/|/vendor/' \
+            | sort -u \
+            | tee analysis/report/fts_firmware_strings.txt
+
+      - name: Analyze all firmware references
         run: |
-          echo "Beryl stock ROM analysis workflow finished."
-          echo "The Python analyzer was embedded directly into this workflow."
-          echo "No stock .img/.ko/.so files are automatically copied into the device tree."
+          set +e
+
+          : > analysis/report/firmware_references.txt
+
+          while IFS= read -r module
+          do
+            if strings -a "$module" 2>/dev/null |
+              grep -Eiq \
+              'request_firmware|/odm/firmware|/vendor/firmware'
+            then
+
+              {
+                echo "================================"
+                echo "$module"
+                echo "================================"
+
+                strings -a "$module" |
+                  grep -Ei \
+                  'request_firmware|firmware|\.bin|\.fw|/odm/|/vendor/'
+
+                echo
+              } >> analysis/report/firmware_references.txt
+            fi
+          done < analysis/report/modules.txt
+
+      - name: Check touch dependency chain
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path("analysis/extracted")
+          report = Path("analysis/report")
+
+          required = [
+              "fts_touch_i2c.ko",
+              "xiaomi_tp.ko",
+              "lct_tp.ko",
+              "scp.ko",
+              "mtk-afe-external.ko",
+              "mtk_tinysys_ipi.ko",
+              "mtk_rpmsg_mbox.ko",
+              "mtk-mbox.ko",
+          ]
+
+          available = {
+              p.name for p in root.rglob("*.ko")
+          }
+
+          lines = []
+
+          for module in required:
+              state = (
+                  "PRESENT"
+                  if module in available
+                  else "MISSING"
+              )
+
+              lines.append(
+                  f"{module}: {state}"
+              )
+
+          output = "\n".join(lines) + "\n"
+
+          print(output)
+
+          (report / "touch_dependency_check.txt").write_text(
+              output
+          )
+          PY
+
+      - name: Search firmware directories
+        run: |
+          find analysis/extracted \
+            -type d \
+            \( -iname '*firmware*' \
+            -o -path '*/odm/*' \
+            -o -path '*/vendor/*' \) \
+            | sort \
+            > analysis/report/firmware_directories.txt
+
+      - name: Generate summary
+        run: |
+          {
+            echo "BERYL vendor_dlkm ANALYSIS"
+            echo "=========================="
+            echo
+            echo "Release:"
+            cat analysis/release.json
+            echo
+            echo "SHA256:"
+            cat analysis/report_image_sha256.txt
+            echo
+            echo "MODULE COUNT:"
+            wc -l < analysis/report/modules.txt
+            echo
+            echo "DEPENDENCY CHECK:"
+            cat analysis/report/missing_dependencies.txt
+            echo
+            echo "TOUCH DEPENDENCY CHECK:"
+            cat analysis/report/touch_dependency_check.txt
+            echo
+            echo "FTS TOUCH FIRMWARE REFERENCES:"
+            cat analysis/report/fts_firmware_strings.txt
+            echo
+            echo "FIRMWARE CANDIDATES:"
+            cat analysis/report/firmware_candidates.txt
+          } > analysis/report/SUMMARY.txt
+
+          cat analysis/report/SUMMARY.txt
+
+      - name: Upload analysis report
+        uses: actions/upload-artifact@v4
+        with:
+          name: beryl-vendor-dlkm-analysis
+          path: analysis/report/
+          retention-days: 30
